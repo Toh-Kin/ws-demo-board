@@ -1,0 +1,1158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Workshop Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=Noto+Sans+Bengali:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<div class="toast hide" id="toast"></div>
+
+<script src="config.js"></script>
+<script src="i18n.js"></script>
+<script src="common.js"></script>
+<script>
+/* 1つのファイルに参加者ページと運営ページが入っています。
+   参加者: …/  運営: …/#admin(合言葉は Code.gs の ADMIN_PASS でだけ確認され、このファイルには書かれていません) */
+/* 参加者ページ */
+function runParticipant() {
+'use strict';
+
+var $ = function (s, r) { return (r || document).querySelector(s); };
+var esc = WB.esc;
+
+var S = {
+  lang: 'en', pid: '', name: '', title: 'Workshop Board',
+  st: null, ver: { q: -1, p: -1, a: -1, qa: -1 }, busy: {}, lastFetch: {},
+  questions: [], roster: [], answers: [], qa: [],
+  mine: {}, drafts: {}, qaDraft: '', qaKind: 'question',
+  tab: 'q', sort: 'q', fq: '', fg: '', qaFilter: 'all',
+  showOther: WB.ls('wb.other') !== '0',
+  online: true, started: false, pollT: 0, hdrSig: '', bctlSig: '', meChecked: -1
+};
+function T(k, v) { return WB.t(S.lang, k, v); }
+
+var ICONS = {
+  q: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>',
+  board: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
+  qa: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>',
+  g: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14c2.5 0 4.5 2 4.5 4.5"/></svg>'
+};
+
+/* ───────── 小さな道具 ───────── */
+
+var toastT;
+function toast(msg, err) {
+  var el = $('#toast'); el.textContent = msg; el.className = 'toast' + (err ? ' err' : '');
+  clearTimeout(toastT); toastT = setTimeout(function () { el.className = 'toast hide'; }, 2600);
+}
+
+/* 入力中の欄は、通信で届いた更新で作り直さない（カーソルが飛ぶので）。
+   フォーカスが外れたら、保留していた描画をやり直す。 */
+var pending = {};
+function safe(name, el, fn) {
+  var a = document.activeElement;
+  if (el && a && el.contains(a) && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName)) { pending[name] = { el: el, fn: fn }; return; }
+  delete pending[name]; fn();
+}
+document.addEventListener('focusout', function () {
+  setTimeout(function () {
+    Object.keys(pending).forEach(function (n) { var p = pending[n]; delete pending[n]; safe(n, p.el, p.fn); });
+  }, 60);
+});
+
+function clientId() {
+  var c = WB.ls('wb.client');
+  if (!c) { c = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); WB.ls('wb.client', c); }
+  return c;
+}
+
+function langSw() {
+  return '<div class="langsw">' + WB_LANGS.map(function (l) {
+    return '<button data-l="' + l.code + '" class="' + (S.lang === l.code ? 'on' : '') + '" lang="' + l.code + '">' + esc(l.name) + '</button>';
+  }).join('') + '</div>';
+}
+function bindLangSw(root) {
+  [].forEach.call(root.querySelectorAll('.langsw button, .langbig button'), function (b) {
+    b.onclick = function () { setLang(b.getAttribute('data-l')); };
+  });
+}
+function setLang(l) {
+  S.lang = l; WB.ls('wb.lang', l); document.documentElement.lang = l;
+  if (S.started) { S.hdrSig = ''; S.bctlSig = ''; renderAll(); } else showRegister();
+}
+
+function qLang(q) { return q[S.lang] ? S.lang : (q.en ? 'en' : (q.ja ? 'ja' : 'bn')); }
+function myGroup() {
+  for (var i = 0; i < S.roster.length; i++) if (S.roster[i].p === S.pid) return S.roster[i].g || '';
+  return '';
+}
+function rosterMap() { var m = {}; S.roster.forEach(function (r) { m[r.p] = r; }); return m; }
+function qIndex(id) { for (var i = 0; i < S.questions.length; i++) if (S.questions[i].id === id) return i; return -1; }
+
+/* ───────── 起動 ───────── */
+
+function boot() {
+  S.lang = WB.ls('wb.lang') || '';
+  var pid = WB.ls('wb.pid'), name = WB.ls('wb.name');
+  WB.get('state').then(function (res) {
+    if (res.ok) { S.st = res.state; S.title = res.state.title || S.title; document.title = S.title; }
+    if (!S.lang) S.lang = (res.ok && res.state.defaultLang) || WB.detectUiLang();
+    document.documentElement.lang = S.lang;
+    if (!pid) return showRegister();
+    WB.get('me', { pid: pid }).then(function (m) {
+      if (m.ok && m.found) { S.pid = m.pid; S.name = m.name; startApp(); }
+      else if (m.ok && !m.found) { WB.ls('wb.pid', null); showRegister(T('gone')); }
+      else { S.pid = pid; S.name = name || ''; startApp(); }      /* 通信できないときは、保存してある情報でそのまま開く */
+    });
+  });
+}
+
+/* ───────── 名前の入力 ───────── */
+
+function showRegister(msg) {
+  S.started = false; clearTimeout(S.pollT);
+  var nv = ($('#rgName') || {}).value || '', av = ($('#rgAff') || {}).value || '';
+  var app = $('#app'); app.className = 'wrap';
+  app.innerHTML =
+    '<header class="board"><div class="bTop"><span class="bMark">' + esc(S.title) + '</span></div>' +
+    '<div style="color:var(--chalk);font-size:22px;font-weight:700;line-height:1.5">' + esc(T('welcome')) + '</div></header>' +
+    '<div class="tray"><i></i><i></i></div>' +
+    '<div class="entry">' +
+      '<div><label>' + esc(T('lang')) + '</label><div class="langbig">' + WB_LANGS.map(function (l) {
+        return '<button data-l="' + l.code + '" class="' + (S.lang === l.code ? 'on' : '') + '" lang="' + l.code + '">' + esc(l.name) + '</button>';
+      }).join('') + '</div></div>' +
+      '<div><label for="rgName">' + esc(T('nameLabel')) + '</label><input type="text" id="rgName" maxlength="60" autocomplete="name" placeholder="' + esc(T('namePh')) + '" lang="' + S.lang + '"></div>' +
+      '<div><label for="rgAff">' + esc(T('affilLabel')) + '</label><input type="text" id="rgAff" maxlength="60" placeholder="' + esc(T('affilPh')) + '" lang="' + S.lang + '"></div>' +
+      '<p class="hint" style="margin:0">' + esc(T('rejoin')) + '</p>' +
+      '<div class="err" id="rgErr">' + esc(msg || '') + '</div>' +
+      '<button class="btn" id="rgGo">' + esc(T('start')) + '</button>' +
+    '</div>';
+  $('#rgName').value = nv; $('#rgAff').value = av;
+  bindLangSw(app);
+  var go = function () {
+    var name = $('#rgName').value.trim();
+    if (!name) { $('#rgErr').textContent = T('errName'); return; }
+    var btn = $('#rgGo'); btn.disabled = true; $('#rgErr').textContent = '';
+    WB.post({ type: 'register', name: name, affil: $('#rgAff').value.trim(), lang: S.lang, client: clientId() }).then(function (r) {
+      btn.disabled = false;
+      if (r.ok) { WB.ls('wb.pid', r.pid); WB.ls('wb.name', r.name); S.pid = r.pid; S.name = r.name; startApp(); }
+      else $('#rgErr').textContent = r.error === 'name' ? T('errName') : T('errNet');
+    });
+  };
+  $('#rgGo').onclick = go;
+  $('#rgName').onkeydown = function (e) { if (e.key === 'Enter') go(); };
+}
+
+/* ───────── 本体 ───────── */
+
+function startApp() {
+  S.started = true; S.drafts = {}; S.mine = {}; S.ver = { q: -1, p: -1, a: -1, qa: -1 };
+  S.hdrSig = ''; S.bctlSig = ''; S.meChecked = -1; S.busy = {}; S.lastFetch = {};
+  var app = $('#app'); app.className = 'wrap';
+  app.innerHTML =
+    '<div class="offline hide" id="off"></div>' +
+    '<header class="board" id="hdr"></header><div class="tray"><i></i><i></i></div>' +
+    '<main class="main"><section id="v-q"></section><section id="v-board" class="hide"></section>' +
+    '<section id="v-qa" class="hide"></section><section id="v-g" class="hide"></section></main>' +
+    '<nav class="tabs" id="tabs"></nav>';
+  S.tab = 'q';
+  renderAll();
+  ['questions', 'roster', 'answers', 'qa'].forEach(refresh);
+  clearTimeout(S.pollT); poll();
+}
+
+function renderAll() {
+  renderHeader(); renderTabs(); renderQ(); renderBoardShell(); renderQA(); renderGroup(); showTab(S.tab, true);
+}
+
+function showTab(t, keepScroll) {
+  S.tab = t;
+  ['q', 'board', 'qa', 'g'].forEach(function (x) {
+    var s = $('#v-' + x); if (s) s.classList.toggle('hide', x !== t);
+  });
+  renderTabs();
+  if (!keepScroll) window.scrollTo(0, 0);
+}
+
+function renderTabs() {
+  var el = $('#tabs'); if (!el) return;
+  var items = [['q', 'tabQ'], ['board', 'tabBoard'], ['qa', 'tabQA'], ['g', 'tabGroup']];
+  el.innerHTML = items.map(function (i) {
+    return '<button data-t="' + i[0] + '" class="' + (S.tab === i[0] ? 'on' : '') + '">' + ICONS[i[0]] + '<span>' + esc(T(i[1])) + '</span></button>';
+  }).join('');
+  [].forEach.call(el.querySelectorAll('button'), function (b) { b.onclick = function () { showTab(b.getAttribute('data-t')); }; });
+}
+
+function renderHeader() {
+  var el = $('#hdr'); if (!el) return;
+  var g = myGroup(), sig = [S.title, S.name, g, S.lang].join('|');
+  if (sig === S.hdrSig) return;
+  S.hdrSig = sig;
+  el.innerHTML =
+    '<div class="bTop"><span class="bMark">' + esc(S.title) + '</span>' + langSw() + '</div>' +
+    '<div class="bRow"><div class="who"><b lang="' + S.lang + '">' + esc(S.name) + '</b>' +
+      (g ? '<span class="gb" style="--g:' + WB.gcolor(g) + '">' + esc(T('groupN', { n: g })) + '</span>' : '') + '</div>' +
+      '<div class="timer off" id="tm"><span id="tmv">--:--</span></div></div>' +
+    '<div class="tlabel" id="tml"></div>';
+  bindLangSw(el); tick();
+}
+
+function renderOffline() {
+  var el = $('#off'); if (!el) return;
+  el.textContent = T('offline'); el.classList.toggle('hide', S.online);
+}
+
+/* ───────── タイマー（いつでも見える） ───────── */
+
+function tick() {
+  var box = $('#tm'), v = $('#tmv'), lab = $('#tml'); if (!box) return;
+  var tm = S.st && S.st.timer, rem = WB.remaining(tm), cls = 'timer', txt = '--:--', label = '';
+  if (rem === null) { cls += ' off'; label = T('timerNone'); }
+  else if (tm.run) {
+    if (rem <= 0) { cls += ' end'; txt = '0:00'; label = T('timeUp'); }
+    else { if (rem < 60000) cls += ' warn'; txt = WB.fmt(rem); label = tm.label || ''; }
+  } else { cls += ' warn'; txt = WB.fmt(rem); label = (tm.label ? tm.label + ' · ' : '') + T('paused'); }
+  if (box.className !== cls) box.className = cls;
+  if (v.textContent !== txt) v.textContent = txt;
+  if (lab.textContent !== label) lab.textContent = label;
+}
+setInterval(tick, 250);
+
+/* ───────── 通信（状態を取りに行く） ───────── */
+
+var LISTS = { questions: 'q', roster: 'p', answers: 'a', qa: 'qa' };
+
+function poll() {
+  S.pollT = setTimeout(poll, (WB.cfg.pollSec || 6) * 1000 + Math.random() * 1500);   /* 端末ごとにずらす */
+  if (document.hidden) return;                                                         /* 見ていない間は取りに行かない */
+  WB.get('state').then(function (res) {
+    if (res.ok) { S.online = true; applyState(res.state); } else S.online = false;
+    renderOffline();
+  });
+}
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && S.started) { clearTimeout(S.pollT); poll(); }
+});
+
+function applyState(st) {
+  S.st = st; S.title = st.title || S.title; document.title = S.title;
+  Object.keys(LISTS).forEach(function (n) { if (S.ver[LISTS[n]] < st.v[LISTS[n]]) refresh(n); });
+  renderHeader(); tick();
+  if (S.tab === 'g') renderGroup();
+}
+
+function refresh(name) {
+  if (S.busy[name] || Date.now() - (S.lastFetch[name] || 0) < 1500) return;
+  S.busy[name] = true; S.lastFetch[name] = Date.now();
+  WB.get(name).then(function (res) {
+    S.busy[name] = false;
+    if (!res.ok) { S.online = false; renderOffline(); return; }
+    S.online = true; renderOffline();
+    S.ver[LISTS[name]] = res.v;
+    onList(name, res);
+  });
+}
+
+function onList(name, res) {
+  if (name === 'questions') {
+    S.questions = res.questions; initDrafts();
+    safe('q', $('#v-q'), renderQ); renderBoardCtl(); renderBoardList(); renderQAList();
+  } else if (name === 'roster') {
+    S.roster = res.roster; renderHeader(); renderGroup(); renderBoardCtl(); renderBoardList(); renderQAList(); checkMe();
+  } else if (name === 'answers') {
+    S.answers = res.answers; deriveMine(); renderBoardList();
+  } else if (name === 'qa') {
+    S.qa = res.qa; renderQAList();
+  }
+}
+
+/* 運営に削除された場合などに、名前の入力へ戻す（一覧は少し古いことがあるので、直接たしかめる） */
+function checkMe() {
+  var found = S.roster.some(function (r) { return r.p === S.pid; });
+  if (found || S.meChecked === S.ver.p) return;
+  S.meChecked = S.ver.p;
+  WB.get('me', { pid: S.pid }).then(function (m) {
+    if (m.ok && !m.found) { WB.ls('wb.pid', null); showRegister(T('gone')); }
+  });
+}
+
+/* ───────── 問い ───────── */
+
+function dkey(qid) { return 'wb.d.' + S.pid + '.' + qid; }
+function initDrafts() {
+  S.questions.forEach(function (q) {
+    if (S.drafts[q.id] === undefined) { var d = WB.ls(dkey(q.id)); if (d !== null && d !== undefined) S.drafts[q.id] = d; }
+  });
+}
+function deriveMine() {
+  S.answers.forEach(function (a) {
+    if (a.p !== S.pid) return;
+    S.mine[a.q] = { text: a.t, rev: a.r };
+    if (S.drafts[a.q] === undefined) {                      /* 別の端末で書いた回答を、この端末にも出す */
+      S.drafts[a.q] = a.t;
+      var ta = $('#ta-' + a.q); if (ta && document.activeElement !== ta) ta.value = a.t;
+    }
+  });
+  updAllQ();
+}
+
+function qCard(q, i) {
+  var others = '';
+  if (S.showOther) {
+    others = WB_LANGS.filter(function (l) { return l.code !== S.lang && q[l.code]; }).map(function (l) {
+      return '<span lang="' + l.code + '">' + esc(q[l.code]) + '</span>';
+    }).join('');
+  }
+  return '<article class="qc"><div class="qhead"><span class="qno">' + esc(T('qN', { n: i + 1 })) + '</span><span class="qstat" id="qs-' + q.id + '"></span></div>' +
+    '<p class="qtx" lang="' + qLang(q) + '">' + esc(WB.qText(q, S.lang)) + '</p>' +
+    (others ? '<p class="qother">' + others + '</p>' : '') +
+    '<textarea id="ta-' + q.id + '" data-q="' + q.id + '" lang="' + S.lang + '" placeholder="' + esc(T('write')) + '"></textarea>' +
+    '<div class="rowb"><span class="hint">' + esc(T('autoSaved')) + '</span><button class="btn sm" id="bt-' + q.id + '" data-q="' + q.id + '"></button></div></article>';
+}
+
+function renderQ() {
+  var el = $('#v-q'); if (!el) return;
+  if (!S.questions.length) { el.innerHTML = '<div class="empty">' + esc(T('noQuestions')) + '</div>'; return; }
+  el.innerHTML =
+    '<div class="rowb" style="margin-bottom:12px"><span class="hint" style="flex:1 1 200px">' + esc(T('translateNote')) + '</span>' +
+    '<label class="chk"><input type="checkbox" id="showOther"' + (S.showOther ? ' checked' : '') + '> ' + esc(T('showOther')) + '</label></div>' +
+    '<div style="display:flex;flex-direction:column;gap:12px">' + S.questions.map(qCard).join('') + '</div>';
+  $('#showOther').onchange = function () { S.showOther = this.checked; WB.ls('wb.other', this.checked ? '1' : '0'); renderQ(); };
+  S.questions.forEach(function (q) {
+    var ta = $('#ta-' + q.id);
+    ta.value = S.drafts[q.id] !== undefined ? S.drafts[q.id] : '';
+    ta.oninput = function () { S.drafts[q.id] = ta.value; WB.ls(dkey(q.id), ta.value); updQ(q.id); };
+    $('#bt-' + q.id).onclick = function () { sendAnswer(q.id); };
+    updQ(q.id);
+  });
+}
+
+function updQ(qid) {
+  var ta = $('#ta-' + qid), bt = $('#bt-' + qid), st = $('#qs-' + qid); if (!ta || !bt || !st) return;
+  var cur = (ta.value || '').trim(), m = S.mine[qid], sent = m ? m.text : '';
+  if (m && cur === sent) { st.textContent = T('sentOk') + ' ✓'; st.className = 'qstat ok'; bt.textContent = T('sentOk'); bt.disabled = true; }
+  else if (!cur) { st.textContent = m ? T('sentOk') + ' ✓' : T('unsent'); st.className = 'qstat' + (m ? ' ok' : ''); bt.textContent = T('send'); bt.disabled = true; }
+  else { st.textContent = T('unsent'); st.className = 'qstat'; bt.textContent = m ? T('sendChanges') : T('send'); bt.disabled = false; }
+}
+function updAllQ() { S.questions.forEach(function (q) { updQ(q.id); }); }
+
+function sendAnswer(qid) {
+  var text = (S.drafts[qid] || '').trim();
+  if (!text) { toast(T('emptyErr'), true); return; }
+  var bt = $('#bt-' + qid); bt.disabled = true;
+  WB.post({ type: 'answer', pid: S.pid, qid: qid, text: text, lang: S.lang }).then(function (r) {
+    if (r.ok) {
+      S.mine[qid] = { text: text, rev: r.revision };
+      upsertAnswer(qid, text, r);
+      toast(r.duplicate ? T('nochange') : T('sentMsg'));
+    } else if (r.error === 'nopid') { WB.ls('wb.pid', null); showRegister(T('gone')); return; }
+    else toast(T('fail'), true);
+    updQ(qid);
+  });
+}
+
+function upsertAnswer(qid, text, r) {
+  var rec = { q: qid, p: S.pid, l: r.lang, t: text, ja: r.ja, en: r.en, bn: r.bn, r: r.revision, ts: Date.now() }, found = false;
+  S.answers = S.answers.map(function (a) { if (a.q === qid && a.p === S.pid) { found = true; return rec; } return a; });
+  if (!found) S.answers.push(rec);
+  renderBoardList();
+}
+
+/* ───────── ボード ───────── */
+
+function renderBoardShell() {
+  var el = $('#v-board'); if (!el) return;
+  el.innerHTML = '<p class="hint" style="margin:0">' + esc(T('boardNote')) + '</p><div class="ctl" id="bctl"></div><div id="bl" style="display:flex;flex-direction:column;gap:14px"></div>';
+  S.bctlSig = ''; renderBoardCtl(); renderBoardList();
+}
+
+function groupList() {
+  var seen = {};
+  S.roster.forEach(function (r) { if (r.g) seen[r.g] = 1; });
+  return Object.keys(seen).sort(function (a, b) { return a - b; });
+}
+
+function renderBoardCtl() {
+  var el = $('#bctl'); if (!el) return;
+  var gs = groupList();
+  var sig = [S.lang, S.sort, S.fq, S.fg, S.questions.map(function (q) { return q.id; }).join(), gs.join()].join('|');
+  if (sig === S.bctlSig) return;
+  S.bctlSig = sig;
+  el.innerHTML =
+    '<div class="seg2"><button data-s="q" class="' + (S.sort === 'q' ? 'on' : '') + '">' + esc(T('byQ')) + '</button>' +
+    '<button data-s="g" class="' + (S.sort === 'g' ? 'on' : '') + '">' + esc(T('byG')) + '</button></div>' +
+    '<select id="fq" lang="' + S.lang + '"><option value="">' + esc(T('allQ')) + '</option>' + S.questions.map(function (q, i) {
+      return '<option value="' + q.id + '"' + (S.fq === q.id ? ' selected' : '') + '>' + esc(T('qN', { n: i + 1 })) + '</option>';
+    }).join('') + '</select>' +
+    '<select id="fg" lang="' + S.lang + '"><option value="">' + esc(T('allG') ) + '</option>' + gs.map(function (g) {
+      return '<option value="' + g + '"' + (S.fg === g ? ' selected' : '') + '>' + esc(T('groupN', { n: g })) + '</option>';
+    }).join('') + '</select>';
+  [].forEach.call(el.querySelectorAll('.seg2 button'), function (b) {
+    b.onclick = function () { S.sort = b.getAttribute('data-s'); S.bctlSig = ''; renderBoardCtl(); renderBoardList(); };
+  });
+  $('#fq').onchange = function () { S.fq = this.value; S.bctlSig = ''; renderBoardList(); };
+  $('#fg').onchange = function () { S.fg = this.value; S.bctlSig = ''; renderBoardList(); };
+}
+
+function boardItems() {
+  var rm = rosterMap(), out = [];
+  S.answers.forEach(function (a) {
+    var r = rm[a.p], qi = qIndex(a.q);
+    if (!r || qi < 0) return;
+    if (S.fq && a.q !== S.fq) return;
+    if (S.fg && String(r.g) !== S.fg) return;
+    out.push({ a: a, name: r.n, g: r.g, qi: qi, mine: a.p === S.pid });
+  });
+  return out;
+}
+
+function card(it, mode) {
+  var a = it.a, tr = (a.l !== S.lang && a[S.lang]) ? a[S.lang] : null;
+  var tag = mode === 'q' ? (it.g ? T('groupN', { n: it.g }) : T('noGroup')) : T('qN', { n: it.qi + 1 });
+  return '<div class="cardn' + (it.mine ? ' mine' : '') + '" style="--g:' + (it.g ? WB.gcolor(it.g) : '#8C8275') + '">' +
+    '<div class="wh">' + esc(it.name) + (it.mine ? ' (' + esc(T('mine')) + ')' : '') + ' · ' + esc(tag) + '</div>' +
+    '<p lang="' + (tr ? S.lang : a.l) + '">' + esc(tr || a.t) + '</p>' +
+    (tr ? '<div class="tr" lang="' + a.l + '"><small>' + esc(T('original')) + ' · ' + esc(WB.langName(a.l)) + '</small>' + esc(a.t) + '</div>' : '') +
+    '</div>';
+}
+
+function renderBoardList() {
+  var el = $('#bl'); if (!el) return;
+  var items = boardItems(), html = '';
+  var byName = function (a, b) { return WB.cmp(a.name, b.name); };
+  if (!items.length && !S.questions.length) { el.innerHTML = '<div class="empty">' + esc(T('noAnswers')) + '</div>'; return; }
+
+  if (S.sort === 'q') {
+    S.questions.forEach(function (q, i) {
+      if (S.fq && q.id !== S.fq) return;
+      var list = items.filter(function (it) { return it.a.q === q.id; })
+        .sort(function (a, b) { return (parseInt(a.g, 10) || 999) - (parseInt(b.g, 10) || 999) || byName(a, b); });
+      html += '<div class="sec"><div class="sech"><h3 lang="' + qLang(q) + '">' + esc(T('qN', { n: i + 1 })) + ' · ' + esc(WB.qText(q, S.lang)) + '</h3><span class="n">' + list.length + '</span></div>' +
+        (list.length ? '<div class="grid">' + list.map(function (it) { return card(it, 'q'); }).join('') + '</div>' : '<div class="empty">' + esc(T('noAnswers')) + '</div>') + '</div>';
+    });
+  } else {
+    var by = {};
+    items.forEach(function (it) { var k = it.g || '0'; (by[k] = by[k] || []).push(it); });
+    var keys = Object.keys(by).sort(function (a, b) { return (a === '0' ? 9999 : +a) - (b === '0' ? 9999 : +b); });
+    keys.forEach(function (k) {
+      var list = by[k].sort(function (a, b) { return a.qi - b.qi || byName(a, b); });
+      html += '<div class="sec"><div class="sech"><h3><span class="gb" style="--g:' + (k === '0' ? '#8C8275' : WB.gcolor(k)) + '">' +
+        esc(k === '0' ? T('noGroup') : T('groupN', { n: k })) + '</span></h3><span class="n">' + list.length + '</span></div>' +
+        '<div class="grid">' + list.map(function (it) { return card(it, 'g'); }).join('') + '</div></div>';
+    });
+    if (!keys.length) html = '<div class="empty">' + esc(T('noAnswers')) + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+/* ───────── Q&A ───────── */
+
+function renderQA() {
+  var el = $('#v-qa'); if (!el) return;
+  el.innerHTML =
+    '<div class="box"><p class="hint" style="margin:0">' + esc(T('qaIntro')) + '</p>' +
+    '<div class="seg2" id="qakind" style="align-self:flex-start"><button data-k="question">' + esc(T('kindQ')) + '</button><button data-k="word">' + esc(T('kindW')) + '</button></div>' +
+    '<textarea id="qaTa" lang="' + S.lang + '" placeholder="' + esc(T('qaPh')) + '"></textarea>' +
+    '<button class="btn" id="qaPost">' + esc(T('post')) + '</button></div>' +
+    '<div class="chips" id="qaf" style="margin-top:12px"></div><div class="sec" id="qaList" style="margin-top:6px"></div>';
+  var ta = $('#qaTa'); ta.value = S.qaDraft;
+  ta.oninput = function () { S.qaDraft = ta.value; };
+  var setKind = function () {
+    [].forEach.call(document.querySelectorAll('#qakind button'), function (b) { b.classList.toggle('on', b.getAttribute('data-k') === S.qaKind); });
+  };
+  [].forEach.call(document.querySelectorAll('#qakind button'), function (b) {
+    b.onclick = function () { S.qaKind = b.getAttribute('data-k'); setKind(); };
+  });
+  setKind();
+  $('#qaPost').onclick = postQA;
+  renderQAList();
+}
+
+function postQA() {
+  var text = (S.qaDraft || '').trim();
+  if (!text) { toast(T('emptyErr'), true); return; }
+  var bt = $('#qaPost'); bt.disabled = true;
+  WB.post({ type: 'qa_post', pid: S.pid, text: text, kind: S.qaKind, lang: S.lang }).then(function (r) {
+    bt.disabled = false;
+    if (r.ok) { S.qaDraft = ''; $('#qaTa').value = ''; toast(T('posted')); S.lastFetch.qa = 0; refresh('qa'); }
+    else if (r.error === 'nopid') { WB.ls('wb.pid', null); showRegister(T('gone')); }
+    else toast(T('fail'), true);
+  });
+}
+
+function hhmm(ts) { try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
+
+function qaItem(x, rm) {
+  var r = rm[x.p], name = r ? r.n : '—', g = r && r.g;
+  var tr = (x.l !== S.lang && x[S.lang]) ? x[S.lang] : null;
+  var h = '<article class="qai' + (x.a ? ' done' : '') + (x.p === S.pid ? ' mine' : '') + '">' +
+    '<div class="meta"><span class="tag ' + (x.k === 'word' ? 'w' : 'q') + '">' + esc(x.k === 'word' ? T('kindW') : T('kindQ')) + '</span>' +
+    '<span class="tag ' + (x.a ? 'ok' : 'op') + '">' + esc(x.a ? T('answered') + ' ✓' : T('open')) + '</span>' +
+    '<span>' + esc(name) + (x.p === S.pid ? ' (' + esc(T('mine')) + ')' : '') + '</span>' +
+    (g ? '<span class="gb" style="--g:' + WB.gcolor(g) + ';height:20px;min-width:20px;font-size:11px">' + esc(g) + '</span>' : '') +
+    '<span>' + esc(hhmm(x.ts)) + '</span></div>' +
+    '<p lang="' + (tr ? S.lang : x.l) + '">' + esc(tr || x.t) + '</p>' +
+    (tr ? '<div class="tr" lang="' + x.l + '"><small>' + esc(T('original')) + ' · ' + esc(WB.langName(x.l)) + '</small>' + esc(x.t) + '</div>' : '');
+  if (x.ans) {
+    var at = (x.ans.l !== S.lang && x.ans[S.lang]) ? x.ans[S.lang] : null;
+    h += '<div class="ans"><b>' + esc(T('fAnswer')) + '</b><p lang="' + (at ? S.lang : x.ans.l) + '">' + esc(at || x.ans.t) + '</p>' +
+      (at ? '<div class="tr" lang="' + x.ans.l + '"><small>' + esc(T('original')) + '</small>' + esc(x.ans.t) + '</div>' : '') + '</div>';
+  }
+  return h + '</article>';
+}
+
+function renderQAList() {
+  var list = $('#qaList'), chips = $('#qaf'); if (!list) return;
+  var rm = rosterMap();
+  var nOpen = S.qa.filter(function (x) { return !x.a; }).length, nDone = S.qa.length - nOpen;
+  var defs = [['all', T('all'), S.qa.length], ['open', T('open'), nOpen], ['done', T('answered'), nDone]];
+  chips.innerHTML = defs.map(function (d) {
+    return '<button class="chip' + (S.qaFilter === d[0] ? ' on' : '') + '" data-f="' + d[0] + '">' + esc(d[1]) + ' (' + d[2] + ')</button>';
+  }).join('');
+  [].forEach.call(chips.querySelectorAll('button'), function (b) { b.onclick = function () { S.qaFilter = b.getAttribute('data-f'); renderQAList(); }; });
+  var shown = S.qa.filter(function (x) { return S.qaFilter === 'all' || (S.qaFilter === 'open' ? !x.a : x.a); });
+  list.innerHTML = shown.length ? shown.map(function (x) { return qaItem(x, rm); }).join('') : '<div class="empty">' + esc(T('noQA')) + '</div>';
+}
+
+/* ───────── グループ ───────── */
+
+function renderGroup() {
+  var el = $('#v-g'); if (!el) return;
+  var g = myGroup(), on = S.st && S.st.groupsOn;
+  var html = '';
+  if (!on || !g) {
+    html = '<div class="wait"><h4>' + esc(T('groupWait')) + '</h4><p>' + esc(T('groupWaitSub')) + '</p></div>';
+  } else {
+    var mem = S.roster.filter(function (r) { return r.g === g; }).sort(function (a, b) { return WB.cmp(a.n, b.n); });
+    html = '<div class="gcard" style="--g:' + WB.gcolor(g) + '"><span class="lab">' + esc(T('groupYours')) + '</span><span class="num">' + esc(g) + '</span></div>' +
+      '<h3 style="margin:6px 0 0;font-size:13px;letter-spacing:.06em;color:var(--dim)">' + esc(T('members')) + ' (' + mem.length + ')</h3>' +
+      '<ul class="mem">' + mem.map(function (r) {
+        return '<li class="' + (r.p === S.pid ? 'me' : '') + '"><span lang="' + S.lang + '">' + esc(r.n) + '</span>' + (r.p === S.pid ? '<small>' + esc(T('you')) + '</small>' : '') + '</li>';
+      }).join('') + '</ul>';
+  }
+  html += '<div style="margin-top:14px;text-align:center"><div class="hint">' + esc(T('registeredAs')) + ': <b>' + esc(S.name) + '</b></div>' +
+    '<button class="link" id="notyou">' + esc(T('notYou')) + '</button></div>';
+  el.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px">' + html + '</div>';
+  $('#notyou').onclick = function () {
+    if (!confirm(T('notYouAsk'))) return;
+    WB.ls('wb.pid', null); WB.ls('wb.name', null); showRegister();
+  };
+}
+
+boot();
+}
+
+/* 運営（親）ページ。参加者ページは index.html（別のページ）。
+   合言葉は Code.gs の ADMIN_PASS でだけ確認される。このファイルには書かれていない。 */
+function runAdmin() {
+'use strict';
+
+var $ = function (s, r) { return (r || document).querySelector(s); };
+var $$ = function (s, r) { return [].slice.call((r || document).querySelectorAll(s)); };
+var esc = WB.esc;
+
+var A = {
+  pass: '', d: null, tab: 'ov', timer: 0,
+  qEdit: null, qDirty: false, qVer: -1, qImport: false,
+  draft: {}, draftDirty: false, gSet: { mode: 'size', val: 3, mix: true }, gConfirm: false, gSig: '',
+  set: null, sDirty: false,
+  ansLang: WB.ls('wb.alang') || 'ja', ansQ: '', onlyMissing: false,
+  qaFilter: 'open', qaDraft: {}, tmLabel: '', tmMin: '10'
+};
+
+var TABS = [['ov', '概要'], ['q', '問い'], ['t', 'タイマー'], ['g', 'グループ'], ['a', '回答'], ['qa', 'Q&A'], ['s', '設定']];
+var LNAME = { ja: '日本語', en: 'English', bn: 'বাংলা' };
+
+/* ───────── 小さな道具 ───────── */
+
+var toastT;
+function toast(msg, err) {
+  var el = $('#toast'); el.textContent = msg; el.className = 'toast' + (err ? ' err' : '');
+  clearTimeout(toastT); toastT = setTimeout(function () { el.className = 'toast hide'; }, 2800);
+}
+
+/* 入力中の欄は、通信の更新で作り直さない */
+var pending = {};
+function safe(name, el, fn) {
+  var a = document.activeElement;
+  if (el && a && el.contains(a) && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName)) { pending[name] = { el: el, fn: fn }; return; }
+  delete pending[name]; fn();
+}
+document.addEventListener('focusout', function () {
+  setTimeout(function () {
+    Object.keys(pending).forEach(function (n) { var p = pending[n]; delete pending[n]; safe(n, p.el, p.fn); });
+  }, 60);
+});
+window.addEventListener('beforeunload', function (e) {
+  if (A.qDirty || A.sDirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+function call(obj) {
+  obj.pass = A.pass;
+  return WB.post(obj).then(function (r) {
+    if (r && r.error === 'auth') { logout('合言葉が正しくありません'); }
+    return r;
+  });
+}
+function hhmm(ts) { try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
+function clone(o) { return JSON.parse(JSON.stringify(o)); }
+function pmap() { var m = {}; (A.d ? A.d.participants : []).forEach(function (p) { m[p.p] = p; }); return m; }
+function nameKey(s) { return String(s).toLowerCase().replace(/[\s.,\-_'’​-‍﻿]/g, ''); }
+function participantUrl() { return location.href.replace(/[#?].*$/, ''); }
+function qNo(id) { var q = A.d.questions; for (var i = 0; i < q.length; i++) if (q[i].id === id) return i + 1; return 0; }
+function disp(it, lang) { return lang === 'orig' ? it.t : (it[lang] || it.t); }
+
+/* ───────── ログイン ───────── */
+
+function showLogin(msg) {
+  clearTimeout(A.timer);
+  $('#app').innerHTML =
+    '<header class="board"><div class="bTop"><span class="bMark">WORKSHOP BOARD · 運営</span></div>' +
+    '<div style="color:var(--chalk);font-size:22px;font-weight:700">運営ページ</div></header><div class="tray"><i></i><i></i></div>' +
+    '<div class="entry" style="max-width:420px"><div><label for="lgPass">合言葉</label><input type="password" id="lgPass" autocomplete="current-password"></div>' +
+    '<div class="err" id="lgErr">' + esc(msg || '') + '</div><button class="btn" id="lgGo">入る</button></div>';
+  var go = function () {
+    var p = $('#lgPass').value; if (!p) return;
+    $('#lgGo').disabled = true;
+    WB.post({ type: 'a_auth', pass: p }).then(function (r) {
+      $('#lgGo').disabled = false;
+      if (r.ok) { A.pass = p; WB.ss('wb.apass', p); start(); }
+      else $('#lgErr').textContent = r.error === 'auth' ? '合言葉が正しくありません' : 'つながりません。URL（config.js）とネットワークを確認してください';
+    });
+  };
+  $('#lgGo').onclick = go; $('#lgPass').onkeydown = function (e) { if (e.key === 'Enter') go(); };
+}
+function logout(msg) { A.pass = ''; WB.ss('wb.apass', null); A.d = null; showLogin(msg); }
+
+/* ───────── 本体 ───────── */
+
+function start() {
+  $('#app').innerHTML =
+    '<header class="board" id="ahdr"></header><div class="tray"><i></i><i></i></div>' +
+    '<nav class="atabs" id="atabs"></nav><main class="apane" id="pane"></main>';
+  A.tab = 'ov'; A.qEdit = null; A.qDirty = false; A.set = null; A.sDirty = false;
+  load();
+}
+
+function load() {
+  clearTimeout(A.timer);
+  call({ type: 'a_dump' }).then(function (r) {
+    if (r && r.ok) { A.d = r; onData(); }
+    else if (r && r.error === 'network') toast('つながりません。再試行します…', true);
+    A.timer = setTimeout(function () { if (A.pass) { if (document.hidden) A.timer = setTimeout(load, 5000); else load(); } }, 5000);
+  });
+}
+document.addEventListener('visibilitychange', function () { if (!document.hidden && A.pass) load(); });
+
+function onData() {
+  var d = A.d, st = d.state;
+  if (!A.qEdit || (!A.qDirty && A.qVer !== st.v.q)) { A.qEdit = clone(d.questions); A.qVer = st.v.q; if (A.tab === 'q') renderPane(true); }
+  if (!A.draftDirty) {
+    A.draft = {}; d.participants.forEach(function (p) { if (p.d) A.draft[p.p] = p.d; });
+  }
+  if (!A.set || !A.sDirty) A.set = { title: st.title, defaultLang: st.defaultLang, expected: st.expected };
+  var sig = JSON.stringify(A.draft) + '|' + d.participants.map(function (p) { return p.p; }).join();
+  if (sig !== A.gSig) { A.gSig = sig; A.gConfirm = false; }
+  renderHead(); renderTabs(); renderPane(false);
+}
+
+function renderHead() {
+  var d = A.d, el = $('#ahdr'); if (!el) return;
+  var open = d.qa.filter(function (x) { return !x.a; }).length;
+  if (!$('#pT')) {
+    el.innerHTML = '<div class="abar"><h1 id="hTitle"></h1><span class="pill" id="pP"></span><span class="pill" id="pA"></span><span class="pill" id="pQ"></span><span class="pill" id="pT">--:--</span></div>';
+  }
+  $('#hTitle').textContent = '運営ページ · ' + d.state.title;
+  $('#pP').textContent = '参加者 ' + d.participants.length + (d.state.expected ? ' / ' + d.state.expected : '');
+  $('#pA').textContent = '回答 ' + d.answers.length;
+  $('#pQ').textContent = '未回答Q&A ' + open; $('#pQ').classList.toggle('hot', open > 0);
+}
+
+function renderTabs() {
+  var el = $('#atabs'); if (!el) return;
+  var open = A.d.qa.filter(function (x) { return !x.a; }).length;
+  var html = TABS.map(function (t) {
+    return '<button data-t="' + t[0] + '" class="' + (A.tab === t[0] ? 'on' : '') + '">' + t[1] + (t[0] === 'qa' && open ? '<span class="dot">' + open + '</span>' : '') + '</button>';
+  }).join('');
+  if (el.getAttribute('data-sig') === html) return;
+  el.setAttribute('data-sig', html); el.innerHTML = html;
+  $$('button', el).forEach(function (b) { b.onclick = function () { A.tab = b.getAttribute('data-t'); renderTabs(); renderPane(true); window.scrollTo(0, 0); }; });
+}
+
+function renderPane(force) {
+  var el = $('#pane'); if (!el || !A.d) return;
+  var fn = { ov: pOverview, q: pQuestions, t: pTimer, g: pGroups, a: pAnswers, qa: pQA, s: pSettings }[A.tab];
+  if (!force && ((A.tab === 'q' && A.qDirty) || (A.tab === 's' && A.sDirty))) return;     /* 編集中の内容は守る */
+  if (force) { delete pending.pane; fn(el); } else safe('pane', el, function () { fn(el); });
+}
+
+/* ───────── 概要 ───────── */
+
+function pOverview(el) {
+  var d = A.d, P = d.participants, Q = d.questions, st = d.state;
+  var nAuto = 0, nMissing = 0;
+  Q.forEach(function (q) { nAuto += q.auto.length; ['ja', 'en', 'bn'].forEach(function (l) { if (!q[l]) nMissing++; }); });
+  var per = {}; d.answers.forEach(function (a) { per[a.q] = (per[a.q] || 0) + 1; });
+  var open = d.qa.filter(function (x) { return !x.a; }).length;
+  var url = participantUrl();
+  var checks = [
+    Q.length ? ['ok', '問いが ' + Q.length + ' 問、登録されています'] : ['ng', '問いがまだありません（「問い」タブで登録）'],
+    nMissing ? ['wn', '言語の欄が ' + nMissing + ' か所、空です（「空欄を自動翻訳」で埋められます）'] : ['ok', 'すべての問いに、日本語・英語・ベンガル語が入っています'],
+    nAuto ? ['wn', '機械翻訳のままの欄が ' + nAuto + ' か所あります。現地の方に確認してもらってください'] : ['ok', '機械翻訳のまま残っている欄はありません'],
+    d.defaultPass ? ['ng', '合言葉が初期値（change-me）のままです'] : ['ok', '合言葉は変更済みです'],
+    st.expected ? (P.length >= st.expected ? ['ok', '参加者が揃いました（' + P.length + ' / ' + st.expected + '人）'] : ['wn', '参加者は ' + P.length + ' / ' + st.expected + '人です']) : ['wn', '参加予定人数が未設定です（「設定」タブ）'],
+    st.groupsOn ? ['ok', 'グループは参加者ページに反映済みです'] : ['wn', 'グループはまだ反映されていません（「グループ」タブ）']
+  ];
+  el.innerHTML =
+    (d.defaultPass ? '<div class="warnbox">合言葉が初期値のままです。Apps Script の Code.gs の <b>ADMIN_PASS</b> を書き換え、「デプロイを管理 → 新バージョン」で更新してください。</div>' : '') +
+    '<div class="box"><h3>参加者に配るURL</h3><div class="urlbox"><input type="text" id="url" readonly value="' + esc(url) + '"><button class="btn sm" id="cpy" style="min-height:44px">コピー</button></div>' +
+    '<div class="small">スマホでも開けます。QRコードにしたいときは、このURLをQRコード作成サイトに貼ってください。</div></div>' +
+    '<div class="stats"><div class="stat"><b>参加者</b><u>' + P.length + '</u><small>' + (st.expected ? '予定 ' + st.expected + '人' : '予定人数 未設定') + '</small></div>' +
+    '<div class="stat"><b>回答</b><u>' + d.answers.length + '</u><small>最新版の件数</small></div>' +
+    '<div class="stat"><b>問い</b><u>' + Q.length + '</u><small>登録済み</small></div>' +
+    '<div class="stat"><b>未回答のQ&A</b><u>' + open + '</u><small>全 ' + d.qa.length + ' 件</small></div></div>' +
+    '<div class="two"><div class="box"><h3>開始前チェック</h3><ul class="check">' + checks.map(function (c) {
+      return '<li class="' + c[0] + '"><i>' + (c[0] === 'ok' ? '✓' : c[0] === 'ng' ? '✕' : '!') + '</i><span>' + esc(c[1]) + '</span></li>';
+    }).join('') + '</ul></div>' +
+    '<div class="box"><h3>問いごとの提出状況</h3>' + (Q.length ? Q.map(function (q, i) {
+      var n = per[q.id] || 0, pct = P.length ? Math.min(100, Math.round(n / P.length * 100)) : 0;
+      return '<div><div class="rowb"><span style="font-size:13px"><b>問い ' + (i + 1) + '</b> <span class="small" lang="ja">' + esc((q.ja || q.en || q.bn).slice(0, 34)) + '…</span></span><b>' + n + ' / ' + P.length + '</b></div><div class="bar"><i style="width:' + pct + '%"></i></div></div>';
+    }).join('') : '<div class="small">問いがありません</div>') + '</div></div>';
+  $('#cpy').onclick = function () {
+    var i = $('#url'); i.select();
+    var ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+    if (!ok && navigator.clipboard) { navigator.clipboard.writeText(url); ok = true; }
+    toast(ok ? 'コピーしました' : 'URLを選択しました。コピーしてください');
+  };
+}
+
+/* ───────── 問い ───────── */
+
+function setQDirty(v) {
+  A.qDirty = v;
+  var b = $('#qSave'), n = $('#qDirty');
+  if (b) b.disabled = !v; if (n) n.classList.toggle('hide', !v);
+}
+
+function pQuestions(el) {
+  var Q = A.qEdit || [];
+  var answered = {}; A.d.answers.forEach(function (a) { answered[a.q] = (answered[a.q] || 0) + 1; });
+  el.innerHTML =
+    '<div class="infobox">問いは事前に登録します。参加者には、登録した全問が最初から見えます（出し入れはありません）。<br>入力欄のどれか1言語だけ書いて「空欄を自動翻訳」を押すと、残りが機械翻訳で埋まります（⚙ の印が付きます）。</div>' +
+    '<div id="qDirty" class="warnbox ' + (A.qDirty ? '' : 'hide') + '">保存していない変更があります。</div>' +
+    '<div id="qList" style="display:flex;flex-direction:column;gap:12px">' + Q.map(function (q, i) {
+      return '<div class="qe" data-i="' + i + '"><div class="top"><b>問い ' + (i + 1) + '</b>' + (q.id ? '<span class="small">' + esc(q.id) + (answered[q.id] ? ' · 回答 ' + answered[q.id] + '件' : '') + '</span>' : '<span class="small">新規</span>') +
+        '<span class="sp"></span><button class="ib" data-a="up"' + (i === 0 ? ' disabled' : '') + '>↑</button><button class="ib" data-a="dn"' + (i === Q.length - 1 ? ' disabled' : '') + '>↓</button><button class="ib" data-a="del">✕</button></div>' +
+        '<div class="langs">' + ['ja', 'en', 'bn'].map(function (l) {
+          return '<div class="lf"><label>' + LNAME[l] + ((q.auto || []).indexOf(l) >= 0 ? ' <span class="mt">⚙ 機械翻訳・要確認</span>' : '') + '</label><textarea data-l="' + l + '" lang="' + l + '">' + esc(q[l]) + '</textarea></div>';
+        }).join('') + '</div></div>';
+    }).join('') + '</div>' + (Q.length ? '' : '<div class="empty">問いがまだありません</div>') +
+    '<div class="row2"><button class="btn2 k" id="qAdd">＋ 問いを追加</button><button class="btn2" id="qTr">空欄を自動翻訳</button><button class="btn2" id="qImp">表計算から貼り付け</button></div>' +
+    '<div id="qImpBox" class="box ' + (A.qImport ? '' : 'hide') + '"><h3>貼り付けで追加</h3><div class="small">スプレッドシートで「日本語｜English｜বাংলা」の3列（1行が1問、空欄OK）をコピーして、下に貼り付けてください。</div>' +
+    '<textarea id="qImpTa" style="min-height:120px" placeholder="日本語の問い[Tab]English question[Tab]বাংলা প্রশ্ন"></textarea><div class="row2"><button class="btn2 k" id="qImpGo">追加する</button></div></div>' +
+    '<div class="row2"><button class="btn sm" id="qSave"' + (A.qDirty ? '' : ' disabled') + ' style="min-width:200px">保存して参加者に反映</button><span class="small">保存すると、参加者の画面にすぐ反映されます</span></div>';
+
+  $$('.qe', el).forEach(function (row) {
+    var i = +row.getAttribute('data-i');
+    $$('textarea', row).forEach(function (ta) {
+      ta.oninput = function () {
+        var l = ta.getAttribute('data-l'); A.qEdit[i][l] = ta.value;
+        var k = (A.qEdit[i].auto || []).indexOf(l);                       /* 手で直したら「機械翻訳」の印を外す */
+        if (k >= 0) { A.qEdit[i].auto.splice(k, 1); var mt = $('.mt', ta.parentNode); if (mt) mt.remove(); }
+        setQDirty(true);
+      };
+    });
+    $$('.ib', row).forEach(function (b) {
+      b.onclick = function () {
+        var a = b.getAttribute('data-a');
+        if (a === 'del') {
+          var q = A.qEdit[i], n = q.id ? A.d.answers.filter(function (x) { return x.q === q.id; }).length : 0;
+          if (n && !confirm('この問いには回答が ' + n + ' 件あります。削除すると、ボードにも表示されなくなります。削除しますか？')) return;
+          A.qEdit.splice(i, 1);
+        } else if (a === 'up' && i > 0) { var t = A.qEdit[i]; A.qEdit[i] = A.qEdit[i - 1]; A.qEdit[i - 1] = t; }
+        else if (a === 'dn' && i < A.qEdit.length - 1) { var t2 = A.qEdit[i]; A.qEdit[i] = A.qEdit[i + 1]; A.qEdit[i + 1] = t2; }
+        setQDirty(true); pQuestions(el);
+      };
+    });
+  });
+  $('#qAdd').onclick = function () { A.qEdit.push({ id: '', ja: '', en: '', bn: '', auto: [] }); setQDirty(true); pQuestions(el); var t = $$('.qe textarea', el); if (t.length) t[t.length - 3].focus(); };
+  $('#qImp').onclick = function () { A.qImport = !A.qImport; $('#qImpBox').classList.toggle('hide', !A.qImport); };
+  $('#qImpGo').onclick = function () {
+    var lines = $('#qImpTa').value.split(/\r?\n/).filter(function (x) { return x.trim(); }), n = 0;
+    lines.forEach(function (ln) {
+      var c = ln.split('\t'); if (!(c[0] || c[1] || c[2])) return;
+      A.qEdit.push({ id: '', ja: (c[0] || '').trim(), en: (c[1] || '').trim(), bn: (c[2] || '').trim(), auto: [] }); n++;
+    });
+    if (n) { setQDirty(true); A.qImport = false; pQuestions(el); toast(n + ' 問を追加しました（まだ保存していません）'); } else toast('追加できる行がありません', true);
+  };
+  $('#qTr').onclick = function () {
+    var b = this; b.disabled = true; b.textContent = '翻訳中…';
+    call({ type: 'a_q_translate', rows: A.qEdit }).then(function (r) {
+      if (r && r.ok) {
+        var changed = 0;
+        r.rows.forEach(function (x, i) { ['ja', 'en', 'bn'].forEach(function (l) { if (x[l] !== A.qEdit[i][l]) changed++; }); A.qEdit[i] = Object.assign({}, A.qEdit[i], x); });
+        if (changed) setQDirty(true);
+        toast(changed ? changed + ' か所を機械翻訳で埋めました。内容を確認してから保存してください' : '空欄はありませんでした');
+        pQuestions(el);
+      } else { b.disabled = false; b.textContent = '空欄を自動翻訳'; toast('翻訳できませんでした', true); }
+    });
+  };
+  $('#qSave').onclick = function () {
+    var b = this; b.disabled = true;
+    call({ type: 'a_q_save', rows: A.qEdit.map(function (q) { return { id: q.id, ja: q.ja, en: q.en, bn: q.bn, auto: q.auto || [] }; }) }).then(function (r) {
+      if (r && r.ok) { A.qEdit = clone(r.questions); setQDirty(false); toast('保存しました。参加者の画面に反映されます'); load(); pQuestions(el); }
+      else { b.disabled = false; toast('保存できませんでした', true); }
+    });
+  };
+}
+
+/* ───────── タイマー ───────── */
+
+function pTimer(el) {
+  var tm = A.d.state.timer, Q = A.d.questions;
+  el.innerHTML =
+    '<div class="box" style="align-items:center;text-align:center"><div class="big" id="tBig">--:--</div><div class="small" id="tLab"></div></div>' +
+    '<div class="box"><h3>開始</h3><div class="row2"><label for="tmLabel">ラベル（参加者の画面に出ます）</label><input type="text" id="tmLabel" list="qids" style="max-width:260px" maxlength="60" placeholder="例：問い1 の話し合い" value="' + esc(A.tmLabel) + '"></div>' +
+    '<datalist id="qids">' + Q.map(function (q, i) { return '<option value="問い ' + (i + 1) + '">'; }).join('') + '</datalist>' +
+    '<div class="presets">' + [3, 5, 10, 15, 20, 30].map(function (m) { return '<button class="btn2 k" data-m="' + m + '">' + m + ' 分</button>'; }).join('') + '</div>' +
+    '<div class="row2"><label for="tmMin">自由に指定</label><input type="number" id="tmMin" class="inp" min="0.5" step="0.5" value="' + esc(A.tmMin) + '"><span>分</span><button class="btn2 k" id="tmGo">開始</button></div></div>' +
+    '<div class="box"><h3>操作</h3><div class="presets"><button class="btn2" id="tmPause">一時停止</button><button class="btn2" id="tmResume">再開</button>' +
+    '<button class="btn2" data-add="-1">−1 分</button><button class="btn2" data-add="1">＋1 分</button><button class="btn2" data-add="5">＋5 分</button><button class="btn2 r" id="tmReset">リセット</button></div>' +
+    '<div class="small">タイマーはすべての参加者の画面の上部に、いつでも表示されます。終了時刻はサーバーの時計で決まるので、端末の時計がずれていても同じ残り時間になります。</div></div>';
+  var op = function (o) {
+    call(Object.assign({ type: 'a_timer' }, o)).then(function (r) {
+      if (r && r.ok) { A.d.state.timer = r.state.timer; adminTick(); renderHead(); } else toast('操作できませんでした', true);
+    });
+  };
+  $('#tmLabel').oninput = function () { A.tmLabel = this.value; };
+  $('#tmMin').oninput = function () { A.tmMin = this.value; };
+  $$('[data-m]', el).forEach(function (b) { b.onclick = function () { op({ op: 'start', minutes: +b.getAttribute('data-m'), label: A.tmLabel }); }; });
+  $('#tmGo').onclick = function () { var m = parseFloat(A.tmMin); if (!(m > 0)) return toast('分を入力してください', true); op({ op: 'start', minutes: m, label: A.tmLabel }); };
+  $('#tmPause').onclick = function () { op({ op: 'pause' }); };
+  $('#tmResume').onclick = function () { op({ op: 'resume' }); };
+  $$('[data-add]', el).forEach(function (b) { b.onclick = function () { op({ op: 'add', minutes: +b.getAttribute('data-add') }); }; });
+  $('#tmReset').onclick = function () { if (confirm('タイマーをリセットしますか？')) op({ op: 'reset' }); };
+  adminTick();
+}
+
+function adminTick() {
+  if (!A.d) return;
+  var tm = A.d.state.timer, rem = WB.remaining(tm), txt = '--:--', lab = 'タイマーは動いていません', end = false;
+  if (rem !== null) {
+    if (tm.run) { end = rem <= 0; txt = end ? '0:00' : WB.fmt(rem); lab = end ? '時間です' : (tm.label || '動作中'); }
+    else { txt = WB.fmt(rem); lab = (tm.label ? tm.label + ' · ' : '') + '一時停止中'; }
+  }
+  var big = $('#tBig'); if (big) { big.textContent = txt; big.classList.toggle('end', end); var l = $('#tLab'); if (l) l.textContent = lab; }
+  var pt = $('#pT'); if (pt) { pt.textContent = '⏱ ' + txt; pt.classList.toggle('hot', end); }
+}
+setInterval(adminTick, 250);
+
+/* ───────── グループ ───────── */
+
+function shuffle(a) { for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)), t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+
+/** 自動配置。mix のときは所属ごとに散らして、同じ所属が同じ班に固まらないようにする */
+function autoAssign(parts, mode, val, mix) {
+  var n = parts.length; if (!n) return {};
+  var k = mode === 'count' ? Math.max(1, val) : Math.max(1, Math.round(n / Math.max(1, val)));
+  k = Math.min(k, n);
+  var order = [];
+  if (mix) {
+    var by = {};
+    parts.forEach(function (p) { var key = (p.aff || '').trim().toLowerCase(); (by[key] = by[key] || []).push(p); });
+    shuffle(Object.keys(by)).sort(function (a, b) { return by[b].length - by[a].length; })
+      .forEach(function (key) { order = order.concat(shuffle(by[key])); });
+  } else order = shuffle(parts.slice());
+  var idx = shuffle(Array.apply(null, Array(k)).map(function (_, i) { return i + 1; }));
+  var out = {};
+  order.forEach(function (p, i) { out[p.p] = String(idx[i % k]); });
+  return out;
+}
+window.__autoAssign = autoAssign;     /* テスト用 */
+
+var saveDraftSoon = WB.debounce(function () {
+  call({ type: 'a_g_draft', assign: A.draft }).then(function (r) {
+    A.draftDirty = false;
+    if (!(r && r.ok)) toast('下書きを保存できませんでした', true);
+  });
+}, 350);
+function draftChanged() { A.draftDirty = true; A.gConfirm = false; A.gSig = ''; saveDraftSoon(); }
+
+function gChecks() {
+  var P = A.d.participants, n = P.length, st = A.d.state, out = [];
+  var un = P.filter(function (p) { return !A.draft[p.p]; });
+  var sizes = {}, affs = {};
+  P.forEach(function (p) {
+    var g = A.draft[p.p]; if (!g) return;
+    sizes[g] = (sizes[g] || 0) + 1; (affs[g] = affs[g] || []).push((p.aff || '').trim().toLowerCase());
+  });
+  var gs = Object.keys(sizes), vals = gs.map(function (g) { return sizes[g]; });
+  out.push(n ? ['ok', '参加者 ' + n + '人を確認しました'] : ['ng', '参加者がまだいません']);
+  if (st.expected) out.push(n === st.expected ? ['ok', '参加予定人数（' + st.expected + '人）と一致しています'] : ['wn', '参加予定 ' + st.expected + '人に対して、いま ' + n + '人です']);
+  out.push(un.length ? ['ng', '未配置の人が ' + un.length + '人います：' + un.slice(0, 4).map(function (p) { return p.n; }).join('、') + (un.length > 4 ? '…' : '')] : (n ? ['ok', '全員がグループに入っています'] : ['wn', '配置する人がいません']));
+  if (vals.length) {
+    var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+    if (mn < 2) out.push(['wn', '1人だけのグループがあります']);
+    if (mx - mn > 1) out.push(['wn', 'グループの人数に差があります（' + mn + '〜' + mx + '人）']);
+    var same = gs.filter(function (g) { var a = affs[g]; return a.length > 1 && a[0] && a.every(function (x) { return x === a[0]; }); });
+    if (same.length) out.push(['wn', 'グループ ' + same.join('・') + ' は、全員が同じ所属です']);
+  }
+  var keys = P.map(function (p) { return { n: p.n, k: nameKey(p.n) }; }), sim = [];
+  for (var i = 0; i < keys.length; i++) for (var j = i + 1; j < keys.length; j++) {
+    var a = keys[i].k, b = keys[j].k;
+    if (a.length >= 3 && b.length >= 3 && (a.indexOf(b) === 0 || b.indexOf(a) === 0)) sim.push(keys[i].n + ' と ' + keys[j].n);
+  }
+  if (sim.length) out.push(['wn', '似た名前があります（同じ人なら、片方を削除してください）：' + sim.slice(0, 3).join('、')]);
+  if (st.groupsOn) {
+    var diff = P.filter(function (p) { return (A.draft[p.p] || '') !== (p.g || ''); }).length;
+    out.push(diff ? ['wn', '反映済みのグループから変わる人：' + diff + '人'] : ['ok', '下書きは、反映済みのグループと同じです']);
+  }
+  return out;
+}
+
+function pGroups(el) {
+  var d = A.d, P = d.participants.slice().sort(function (a, b) { return WB.cmp(a.n, b.n); }), st = d.state;
+  var maxG = 0; P.forEach(function (p) { var g = +A.draft[p.p] || 0; if (g > maxG) maxG = g; });
+  var checks = gChecks(), hasNg = checks.some(function (c) { return c[0] === 'ng'; }), hasWn = checks.some(function (c) { return c[0] === 'wn'; });
+  var un = P.filter(function (p) { return !A.draft[p.p]; });
+  var opts = function (sel) {
+    var s = '<option value="">未配置</option>';
+    for (var g = 1; g <= maxG + 1; g++) s += '<option value="' + g + '"' + (String(sel) === String(g) ? ' selected' : '') + '>' + g + (g === maxG + 1 ? '（新）' : '') + '</option>';
+    return s;
+  };
+  var box = function (g, label, members, cls) {
+    return '<div class="gbox ' + (cls || '') + '" style="--g:' + (g ? WB.gcolor(g) : '#C4362F') + '"><h4>' + label + '（' + members.length + '人）</h4>' + members.map(function (p) {
+      return '<div class="mm"><span lang="' + (/[ঀ-৿]/.test(p.n) ? 'bn' : 'ja') + '">' + esc(p.n) + (p.aff ? '<br><small class="small">' + esc(p.aff) + '</small>' : '') + '</span><select data-p="' + p.p + '">' + opts(A.draft[p.p] || '') + '</select></div>';
+    }).join('') + '</div>';
+  };
+  var boxes = '';
+  for (var g = 1; g <= maxG; g++) boxes += box(String(g), 'グループ ' + g, P.filter(function (p) { return A.draft[p.p] === String(g); }));
+  if (un.length) boxes += box('', '未配置', un, 'un');
+
+  el.innerHTML =
+    '<div class="infobox">流れ：①参加者が名前を入力 → ②「自動配置」で下書きを作る（参加者にはまだ見えません）→ ③確認チェックを見て、必要なら手で移動 → ④確認にチェックして「参加者ページに反映」。反映した後に入った人は、未配置として表示されます。</div>' +
+    '<div class="two"><div class="box"><h3>① 参加者（' + P.length + '人）</h3>' + (P.length ? '<div class="scroll"><table class="tbl"><thead><tr><th>名前</th><th>所属</th><th>言語</th><th>入力</th><th class="c">反映済</th><th></th></tr></thead><tbody>' + P.map(function (p) {
+      return '<tr><td lang="' + (/[ঀ-৿]/.test(p.n) ? 'bn' : 'ja') + '">' + esc(p.n) + '</td><td>' + esc(p.aff) + '</td><td>' + esc(p.l) + '</td><td>' + esc(hhmm(p.j)) + '</td><td class="c">' + (p.g ? '<span class="gb" style="--g:' + WB.gcolor(p.g) + '">' + esc(p.g) + '</span>' : '<span class="no">—</span>') + '</td>' +
+        '<td style="white-space:nowrap"><button class="ib" data-ren="' + p.p + '" title="名前を直す">✎</button> <button class="ib" data-del="' + p.p + '" title="削除">✕</button></td></tr>';
+    }).join('') + '</tbody></table></div>' : '<div class="empty">まだ誰も入っていません</div>') + '</div>' +
+    '<div class="box"><h3>② 自動配置（下書き）</h3><div class="row2"><label>分け方</label><select id="gMode" style="width:auto"><option value="size"' + (A.gSet.mode === 'size' ? ' selected' : '') + '>1グループの人数で</option><option value="count"' + (A.gSet.mode === 'count' ? ' selected' : '') + '>グループ数で</option></select>' +
+    '<input type="number" id="gVal" class="inp" min="1" value="' + A.gSet.val + '"><span>' + (A.gSet.mode === 'size' ? '人' : 'グループ') + '</span></div>' +
+    '<label class="chk"><input type="checkbox" id="gMix"' + (A.gSet.mix ? ' checked' : '') + '> 所属が違う人を混ぜる（同じ所属が固まらないようにする）</label>' +
+    '<div class="row2"><button class="btn2 k" id="gAuto"' + (P.length ? '' : ' disabled') + '>' + (maxG ? '並べ直す（やり直し）' : '自動配置する') + '</button><button class="btn2 r" id="gClearDraft"' + (maxG ? '' : ' disabled') + '>下書きを消す</button></div>' +
+    '<div class="small">人数で分けるときは、人数の差が1人以内になるように割り振ります。</div></div></div>' +
+    '<div class="box"><h3>③ 配置表（下書き）— 移したい人は右のプルダウンで変更</h3>' + (P.length ? '<div class="gboard">' + (boxes || '<div class="empty" style="grid-column:1/-1">「自動配置する」を押すと、ここに表が出ます</div>') + '</div>' : '<div class="empty">参加者が入ると、ここに表示されます</div>') + '</div>' +
+    '<div class="box"><h3>④ 確認チェックと反映</h3><ul class="check">' + checks.map(function (c) { return '<li class="' + c[0] + '"><i>' + (c[0] === 'ok' ? '✓' : c[0] === 'ng' ? '✕' : '!') + '</i><span>' + esc(c[1]) + '</span></li>'; }).join('') + '</ul>' +
+    '<label class="chk"><input type="checkbox" id="gConf"' + (A.gConfirm ? ' checked' : '') + (P.length ? '' : ' disabled') + '> 上の内容を確認しました（下書きを変えると、チェックは外れます）</label>' +
+    '<div class="row2"><button class="btn sm" id="gPub" style="min-width:240px"' + (A.gConfirm && P.length ? '' : ' disabled') + '>' + (hasNg ? '警告を承知で参加者ページに反映' : hasWn ? '注意を承知で参加者ページに反映' : '参加者ページに反映') + '</button>' +
+    (st.groupsOn ? '<button class="btn2 r" id="gUnpub">反映を取り消す</button>' : '') + '</div>' +
+    '<div class="small">' + (st.groupsOn ? '反映済み（' + hhmm(st.gpubAt) + '）。参加者の画面には、グループ番号とメンバーが出ています。' : 'まだ反映していません。参加者の画面は「発表をお待ちください」になっています。') + '</div></div>';
+
+  $('#gMode').onchange = function () { A.gSet.mode = this.value; A.gSet.val = this.value === 'size' ? 3 : 4; pGroups(el); };
+  $('#gVal').oninput = function () { A.gSet.val = Math.max(1, parseInt(this.value, 10) || 1); };
+  $('#gMix').onchange = function () { A.gSet.mix = this.checked; };
+  $('#gAuto').onclick = function () {
+    if (st.groupsOn && !confirm('すでに反映済みです。並べ直すと下書きだけが変わり、「反映」を押すまで参加者の画面は変わりません。続けますか？')) return;
+    A.draft = autoAssign(d.participants, A.gSet.mode, A.gSet.val, A.gSet.mix); draftChanged(); pGroups(el);
+  };
+  $('#gClearDraft').onclick = function () { A.draft = {}; draftChanged(); pGroups(el); };
+  $$('select[data-p]', el).forEach(function (s) {
+    s.onchange = function () { var pid = s.getAttribute('data-p'); if (s.value) A.draft[pid] = s.value; else delete A.draft[pid]; draftChanged(); pGroups(el); };
+  });
+  $('#gConf').onchange = function () { A.gConfirm = this.checked; $('#gPub').disabled = !(this.checked && P.length); };
+  $('#gPub').onclick = function () {
+    var partial = un.length > 0;
+    if (partial && !confirm('未配置の人が ' + un.length + '人います。その人たちは「グループ未定」のまま、残りだけ反映します。よろしいですか？')) return;
+    var b = this; b.disabled = true;
+    call({ type: 'a_g_draft', assign: A.draft }).then(function () {
+      return call({ type: 'a_g_publish', allowPartial: partial });
+    }).then(function (r) {
+      if (r && r.ok) { A.draftDirty = false; A.gConfirm = false; toast('参加者ページに反映しました（' + r.published + '人）'); load(); }
+      else { b.disabled = false; toast(r && r.error === 'unassigned' ? '未配置の人がいます' : '反映できませんでした', true); }
+    });
+  };
+  var un2 = $('#gUnpub'); if (un2) un2.onclick = function () {
+    if (!confirm('反映を取り消すと、参加者の画面は「発表をお待ちください」に戻ります。下書きは残ります。')) return;
+    call({ type: 'a_g_clear' }).then(function (r) { if (r && r.ok) { toast('取り消しました'); load(); } });
+  };
+  $$('[data-ren]', el).forEach(function (b) {
+    b.onclick = function () {
+      var p = pmap()[b.getAttribute('data-ren')], nn = prompt('表示する名前を入力してください', p.n);
+      if (nn === null) return;
+      call({ type: 'a_p_edit', pid: p.p, name: nn }).then(function (r) {
+        if (r && r.ok) { toast('名前を直しました'); load(); } else toast(r && r.error === 'dup' ? '同じ名前の人がすでにいます' : '直せませんでした', true);
+      });
+    };
+  });
+  $$('[data-del]', el).forEach(function (b) {
+    b.onclick = function () {
+      var p = pmap()[b.getAttribute('data-del')];
+      if (!confirm('「' + p.n + '」を削除しますか？（この人の回答はボードから消えます。端末側では名前の入力画面に戻ります）')) return;
+      call({ type: 'a_p_edit', pid: p.p, del: true }).then(function (r) { if (r && r.ok) { delete A.draft[p.p]; draftChanged(); toast('削除しました'); load(); } });
+    };
+  });
+}
+
+/* ───────── 回答 ───────── */
+
+function csvCell(c) {
+  var s = String(c === undefined || c === null ? '' : c);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;                    /* Excel で数式として動かないように */
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+function download(name, rows) {
+  var text = '﻿' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
+  var b = new Blob([text], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
+  a.href = URL.createObjectURL(b); a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+function stamp() { var n = new Date(); return n.getFullYear() + ('0' + (n.getMonth() + 1)).slice(-2) + ('0' + n.getDate()).slice(-2) + '-' + ('0' + n.getHours()).slice(-2) + ('0' + n.getMinutes()).slice(-2); }
+
+function langSel(id) {
+  return '<select id="' + id + '" style="width:auto;min-height:42px;font-size:14px"><option value="ja"' + (A.ansLang === 'ja' ? ' selected' : '') + '>表示：日本語</option><option value="en"' + (A.ansLang === 'en' ? ' selected' : '') + '>表示：English</option><option value="bn"' + (A.ansLang === 'bn' ? ' selected' : '') + '>表示：বাংলা</option><option value="orig"' + (A.ansLang === 'orig' ? ' selected' : '') + '>表示：原文のまま</option></select>';
+}
+
+function pAnswers(el) {
+  var d = A.d, Q = d.questions, pm = pmap(), P = d.participants.slice();
+  P.sort(function (a, b) { return (parseInt(A.draft[a.p] || a.g, 10) || 999) - (parseInt(A.draft[b.p] || b.g, 10) || 999) || WB.cmp(a.n, b.n); });
+  var have = {}; d.answers.forEach(function (a) { have[a.p + '|' + a.q] = 1; });
+  var cnt = {}; Q.forEach(function (q) { cnt[q.id] = d.answers.filter(function (a) { return a.q === q.id; }).length; });
+  var rows = P.filter(function (p) { return !A.onlyMissing || Q.some(function (q) { return !have[p.p + '|' + q.id]; }); });
+  var items = d.answers.filter(function (a) { return pm[a.p] && (!A.ansQ || a.q === A.ansQ); })
+    .sort(function (a, b) { return qNo(a.q) - qNo(b.q) || (parseInt(pm[a.p].g, 10) || 999) - (parseInt(pm[b.p].g, 10) || 999) || WB.cmp(pm[a.p].n, pm[b.p].n); });
+  el.innerHTML =
+    '<div class="box"><h3>提出状況（○ = 提出済み）</h3><label class="chk"><input type="checkbox" id="aMiss"' + (A.onlyMissing ? ' checked' : '') + '> 未提出がある人だけ表示</label>' +
+    (Q.length && P.length ? '<div class="scroll"><table class="tbl"><thead><tr><th>名前</th><th class="c">G</th>' + Q.map(function (q, i) { return '<th class="c">問' + (i + 1) + '<br><span style="font-weight:400">' + cnt[q.id] + '/' + P.length + '</span></th>'; }).join('') + '</tr></thead><tbody>' +
+      rows.map(function (p) {
+        return '<tr><td lang="' + (/[ঀ-৿]/.test(p.n) ? 'bn' : 'ja') + '">' + esc(p.n) + '</td><td class="c">' + esc(p.g || '') + '</td>' + Q.map(function (q) { return have[p.p + '|' + q.id] ? '<td class="c ok">○</td>' : '<td class="c no">—</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table></div>' : '<div class="empty">問い・参加者が揃うと表示されます</div>') + '</div>' +
+    '<div class="box"><h3>回答の一覧</h3><div class="row2">' + langSel('aLang') + '<select id="aQ" style="width:auto;min-height:42px;font-size:14px"><option value="">すべての問い</option>' + Q.map(function (q, i) { return '<option value="' + q.id + '"' + (A.ansQ === q.id ? ' selected' : '') + '>問い ' + (i + 1) + '</option>'; }).join('') + '</select>' +
+    '<span class="sp" style="flex:1"></span><button class="btn2 k" id="aCsv">回答をCSVで保存</button><button class="btn2" id="aCsvQA">Q&AをCSVで保存</button></div>' +
+    (items.length ? '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr))">' + items.map(function (a) {
+      var p = pm[a.p], shown = disp(a, A.ansLang), tr = A.ansLang !== 'orig' && a.l !== A.ansLang && a[A.ansLang];
+      return '<div class="cardn" style="--g:' + (p.g ? WB.gcolor(p.g) : '#8C8275') + '"><div class="wh">' + esc(p.n) + ' · ' + (p.g ? 'G' + esc(p.g) : '未定') + ' · 問' + qNo(a.q) + '</div><p lang="' + (tr ? A.ansLang : a.l) + '">' + esc(shown) + '</p>' +
+        (tr ? '<div class="tr" lang="' + a.l + '"><small>原文 · ' + LNAME[a.l] + '</small>' + esc(a.t) + '</div>' : '') + '</div>';
+    }).join('') + '</div>' : '<div class="empty">該当する回答はまだありません</div>') + '</div>';
+
+  $('#aMiss').onchange = function () { A.onlyMissing = this.checked; pAnswers(el); };
+  $('#aLang').onchange = function () { A.ansLang = this.value; WB.ls('wb.alang', this.value); pAnswers(el); };
+  $('#aQ').onchange = function () { A.ansQ = this.value; pAnswers(el); };
+  $('#aCsv').onclick = function () {
+    var q = {}; Q.forEach(function (x) { q[x.id] = x; });
+    var out = [['参加者ID', '名前', '所属', 'グループ', '問いID', '問い', '問いの文（日本語）', '原文の言語', '回答（原文）', '日本語', 'English', 'বাংলা', '版', '時刻']];
+    d.answers.slice().sort(function (a, b) { return qNo(a.q) - qNo(b.q) || WB.cmp(a.p, b.p); }).forEach(function (a) {
+      var p = pm[a.p] || {}, qq = q[a.q] || {};
+      out.push([a.p, p.n, p.aff, p.g, a.q, '問' + qNo(a.q), qq.ja || qq.en || '', a.l, a.t, a.ja, a.en, a.bn, a.r, new Date(a.ts).toLocaleString()]);
+    });
+    download('answers-' + stamp() + '.csv', out);
+  };
+  $('#aCsvQA').onclick = function () {
+    var out = [['ID', '時刻', '名前', 'グループ', '種別', '言語', '本文（原文）', '日本語', 'English', 'বাংলা', '回答済み', '運営の回答（原文）', '日本語', 'English', 'বাংলা']];
+    d.qa.slice().reverse().forEach(function (x) {
+      var p = pm[x.p] || {}, a = x.ans || {};
+      out.push([x.id, new Date(x.ts).toLocaleString(), p.n, p.g, x.k === 'word' ? '言葉' : '質問', x.l, x.t, x.ja, x.en, x.bn, x.a ? '済' : '', a.t, a.ja, a.en, a.bn]);
+    });
+    download('qa-' + stamp() + '.csv', out);
+  };
+}
+
+/* ───────── Q&A ───────── */
+
+function pQA(el) {
+  var d = A.d, pm = pmap(), all = d.qa;
+  var nOpen = all.filter(function (x) { return !x.a; }).length;
+  var shown = all.filter(function (x) { return A.qaFilter === 'all' || (A.qaFilter === 'open' ? !x.a : x.a); })
+    .sort(function (a, b) { return (a.a - b.a) || (b.ts - a.ts); });
+  var chip = function (k, label, n) { return '<button class="chip' + (A.qaFilter === k ? ' on' : '') + '" data-f="' + k + '">' + label + ' (' + n + ')</button>'; };
+  el.innerHTML =
+    '<div class="infobox">参加者がいつでも書き込める質問・言葉の一覧です。口頭で答えたときや、後で調べて答えたときに「回答済み」にチェックしてください。参加者の画面にも「回答済み」と表示されます。回答の文を書くと、3言語に自動翻訳されて表示されます。</div>' +
+    '<div class="row2"><div class="chips">' + chip('open', '未回答', nOpen) + chip('done', '回答済み', all.length - nOpen) + chip('all', 'すべて', all.length) + '</div><span style="flex:1"></span>' + langSel('qLang') + '</div>' +
+    (shown.length ? '<div style="display:flex;flex-direction:column;gap:10px">' + shown.map(function (x) {
+      var p = pm[x.p] || { n: '—' }, tr = A.ansLang !== 'orig' && x.l !== A.ansLang && x[A.ansLang];
+      var draft = A.qaDraft[x.id] !== undefined ? A.qaDraft[x.id] : (x.ans ? x.ans.t : '');
+      return '<article class="qai' + (x.a ? ' done' : '') + '" data-id="' + x.id + '"><div class="meta"><span class="tag ' + (x.k === 'word' ? 'w' : 'q') + '">' + (x.k === 'word' ? '言葉・用語' : '質問') + '</span><b>' + esc(p.n) + '</b>' + (p.g ? '<span class="gb" style="--g:' + WB.gcolor(p.g) + ';height:20px;min-width:20px;font-size:11px">' + esc(p.g) + '</span>' : '') + '<span>' + esc(hhmm(x.ts)) + '</span></div>' +
+        '<p lang="' + (tr ? A.ansLang : x.l) + '">' + esc(disp(x, A.ansLang)) + '</p>' + (tr ? '<div class="tr" lang="' + x.l + '"><small>原文 · ' + LNAME[x.l] + '</small>' + esc(x.t) + '</div>' : '') +
+        '<label class="chk"><input type="checkbox" data-done' + (x.a ? ' checked' : '') + '> 回答済みにする</label>' +
+        '<textarea data-ans placeholder="回答の文（任意。書くと参加者に表示され、3言語に翻訳されます）" style="min-height:70px;font-size:15px;border-top-width:1px">' + esc(draft) + '</textarea>' +
+        '<div class="row2"><button class="btn2 k" data-save>回答文を保存</button><button class="btn2 r" data-rm>削除</button>' + (x.ans ? '<span class="small">公開中の回答：' + LNAME[x.ans.l] + ' → 自動翻訳済み</span>' : '') + '</div></article>';
+    }).join('') + '</div>' : '<div class="empty">該当する投稿はありません</div>');
+
+  $$('[data-f]', el).forEach(function (b) { b.onclick = function () { A.qaFilter = b.getAttribute('data-f'); pQA(el); }; });
+  $('#qLang').onchange = function () { A.ansLang = this.value; WB.ls('wb.alang', this.value); pQA(el); };
+  $$('.qai', el).forEach(function (row) {
+    var id = row.getAttribute('data-id');
+    $('[data-ans]', row).oninput = function () { A.qaDraft[id] = this.value; };
+    $('[data-done]', row).onchange = function () {
+      var on = this.checked;
+      call({ type: 'a_qa', id: id, answered: on }).then(function (r) { if (r && r.ok) { toast(on ? '回答済みにしました' : '未回答に戻しました'); load(); } else toast('保存できませんでした', true); });
+    };
+    $('[data-save]', row).onclick = function () {
+      var txt = ($('[data-ans]', row).value || '').trim(), b = this; b.disabled = true;
+      call({ type: 'a_qa', id: id, answer: txt, alang: 'ja', answered: txt ? true : undefined }).then(function (r) {
+        b.disabled = false;
+        if (r && r.ok) { delete A.qaDraft[id]; toast(txt ? '回答を保存し、回答済みにしました' : '回答文を消しました'); load(); } else toast('保存できませんでした', true);
+      });
+    };
+    $('[data-rm]', row).onclick = function () {
+      if (!confirm('この投稿を削除しますか？（参加者の画面からも消えます）')) return;
+      call({ type: 'a_qa', id: id, del: true }).then(function (r) { if (r && r.ok) { toast('削除しました'); load(); } });
+    };
+  });
+}
+
+/* ───────── 設定 ───────── */
+
+function pSettings(el) {
+  var S = A.set;
+  el.innerHTML =
+    '<div class="box"><h3>基本設定</h3>' +
+    '<div><label class="small" for="sTitle">ワークショップの名前（参加者の画面の上に出ます）</label><input type="text" id="sTitle" maxlength="80" value="' + esc(S.title) + '"></div>' +
+    '<div><label class="small" for="sLang">はじめて開いた人の画面の言語（端末の設定が優先されます）</label><select id="sLang"><option value="ja">日本語</option><option value="en">English</option><option value="bn">বাংলা</option></select></div>' +
+    '<div><label class="small" for="sExp">参加予定人数（グループ確認のチェックに使います。0 なら使いません）</label><input type="number" id="sExp" min="0" class="inp" value="' + (+S.expected || 0) + '"></div>' +
+    '<div class="row2"><button class="btn sm" id="sSave"' + (A.sDirty ? '' : ' disabled') + '>保存</button></div></div>' +
+    '<div class="box"><h3>本番前の準備と、データの消し方</h3><div class="small" style="line-height:1.9">' +
+    '・リハーサルのデータを消すときは、Apps Script のエディタで関数 <b>resetData</b> を選んで「実行」します（参加者・回答・Q&A・タイマー・グループが消え、問いと設定は残ります）。消したものは戻らないので、必要なら先にスプレッドシートを複製してください。<br>' +
+    '・合言葉を変えるときは、Code.gs の <b>ADMIN_PASS</b> を書き換えて、「デプロイを管理 → 新バージョン」で更新します。<br>' +
+    '・翻訳の言語を増やすときは、i18n.js と Code.gs の LANGS に言語を足します（README を参照）。</div></div>';
+  $('#sLang').value = S.defaultLang;
+  var dirty = function () { A.sDirty = true; $('#sSave').disabled = false; };
+  $('#sTitle').oninput = function () { S.title = this.value; dirty(); };
+  $('#sLang').onchange = function () { S.defaultLang = this.value; dirty(); };
+  $('#sExp').oninput = function () { S.expected = parseInt(this.value, 10) || 0; dirty(); };
+  $('#sSave').onclick = function () {
+    var b = this; b.disabled = true;
+    call({ type: 'a_settings', title: S.title, defaultLang: S.defaultLang, expected: S.expected }).then(function (r) {
+      if (r && r.ok) { A.sDirty = false; toast('保存しました'); load(); } else { b.disabled = false; toast('保存できませんでした', true); }
+    });
+  };
+}
+
+/* ───────── 起動 ───────── */
+
+var saved = WB.ss('wb.apass');
+if (saved) {
+  WB.post({ type: 'a_auth', pass: saved }).then(function (r) {
+    if (r && r.ok) { A.pass = saved; start(); } else showLogin();
+  });
+} else showLogin();
+}
+
+/* ───────── 入口:URL の末尾が #admin なら運営ページ、それ以外は参加者ページ ───────── */
+window.addEventListener('hashchange', function () { location.reload(); });
+if (/^#admin/i.test(location.hash)) {
+  document.documentElement.lang = 'ja';
+  document.title = 'Workshop Board — 運営';
+  var rb = document.createElement('meta'); rb.name = 'robots'; rb.content = 'noindex,nofollow'; document.head.appendChild(rb);
+  document.getElementById('app').className = 'wrap admin';
+  runAdmin();
+} else {
+  runParticipant();
+}
+</script>
+</body>
+</html>
