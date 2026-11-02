@@ -28,8 +28,9 @@ var esc = WB.esc;
 
 var S = {
   lang: 'en', pid: '', name: '', title: 'Workshop Board',
-  st: null, ver: { q: -1, p: -1, a: -1, qa: -1 }, busy: {}, lastFetch: {},
-  questions: [], roster: [], answers: [], qa: [],
+  st: null, ver: { q: -1, p: -1, a: -1, qa: -1, c: -1 }, busy: {}, lastFetch: {},
+  questions: [], roster: [], answers: [], qa: [], comments: [],
+  dq: '', dDraft: {}, imgs: {}, rec: null, dSig: '', cTo: '', cFilter: 'all', tabSig: '',
   mine: {}, drafts: {}, qaDraft: '', qaKind: 'question',
   tab: 'q', sort: 'q', fq: '', fg: '', qaFilter: 'all',
   showOther: WB.ls('wb.other') !== '0',
@@ -41,6 +42,7 @@ var ICONS = {
   q: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>',
   board: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   qa: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 015 .5c0 1.5-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>',
+  disc: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.6 7.1L4 20l1.1-4.6A8 8 0 1121 12z"/></svg>',
   g: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14c2.5 0 4.5 2 4.5 4.5"/></svg>'
 };
 
@@ -93,7 +95,11 @@ function myGroup() {
   return '';
 }
 function rosterMap() { var m = {}; S.roster.forEach(function (r) { m[r.p] = r; }); return m; }
-function qIndex(id) { for (var i = 0; i < S.questions.length; i++) if (S.questions[i].id === id) return i; return -1; }
+/* 問いの表示先: ans=問いタブだけ / disc=考えるタブだけ / both=両方 */
+function ansQs() { return S.questions.filter(function (q) { return q.mode !== 'disc'; }); }
+function discQs() { return S.questions.filter(function (q) { return q.mode !== 'ans'; }); }
+function qIndex(id) { var a = ansQs(); for (var i = 0; i < a.length; i++) if (a[i].id === id) return i; return -1; }
+function dIndex(id) { var a = discQs(); for (var i = 0; i < a.length; i++) if (a[i].id === id) return i; return -1; }
 
 /* ───────── 起動 ───────── */
 
@@ -152,37 +158,41 @@ function showRegister(msg) {
 /* ───────── 本体 ───────── */
 
 function startApp() {
-  S.started = true; S.drafts = {}; S.mine = {}; S.ver = { q: -1, p: -1, a: -1, qa: -1 };
+  S.started = true; S.drafts = {}; S.mine = {}; S.ver = { q: -1, p: -1, a: -1, qa: -1, c: -1 }; S.dDraft = {}; S.imgs = {}; S.comments = [];
   S.hdrSig = ''; S.bctlSig = ''; S.meChecked = -1; S.busy = {}; S.lastFetch = {};
   var app = $('#app'); app.className = 'wrap';
   app.innerHTML =
     '<div class="offline hide" id="off"></div>' +
     '<header class="board" id="hdr"></header><div class="tray"><i></i><i></i></div>' +
-    '<main class="main"><section id="v-q"></section><section id="v-board" class="hide"></section>' +
+    '<main class="main"><section id="v-q"></section><section id="v-disc" class="hide"></section><section id="v-board" class="hide"></section>' +
     '<section id="v-qa" class="hide"></section><section id="v-g" class="hide"></section></main>' +
     '<nav class="tabs" id="tabs"></nav>';
-  S.tab = 'q';
+  S.tab = visibleTabs()[0]; S.tabSig = visibleTabs().join();
   renderAll();
-  ['questions', 'roster', 'answers', 'qa'].forEach(refresh);
+  ['questions', 'roster', 'answers', 'qa', 'comments'].forEach(refresh);
   clearTimeout(S.pollT); poll();
 }
 
 function renderAll() {
-  renderHeader(); renderTabs(); renderQ(); renderBoardShell(); renderQA(); renderGroup(); showTab(S.tab, true);
+  renderHeader(); renderTabs(); renderQ(); renderDisc(); renderBoardShell(); renderQA(); renderGroup(); showTab(S.tab, true);
 }
 
 function showTab(t, keepScroll) {
   S.tab = t;
-  ['q', 'board', 'qa', 'g'].forEach(function (x) {
+  if (t !== 'disc') stopMic();
+  var app = $('#app'); if (app) app.classList.toggle('wide', t === 'disc');
+  ['q', 'disc', 'board', 'qa', 'g'].forEach(function (x) {
     var s = $('#v-' + x); if (s) s.classList.toggle('hide', x !== t);
   });
+  if (t === 'disc') { renderDiscList(true); }
   renderTabs();
   if (!keepScroll) window.scrollTo(0, 0);
 }
 
 function renderTabs() {
   var el = $('#tabs'); if (!el) return;
-  var items = [['q', 'tabQ'], ['board', 'tabBoard'], ['qa', 'tabQA'], ['g', 'tabGroup']];
+  var vis = visibleTabs();
+  var items = [['q', 'tabQ'], ['disc', 'tabDisc'], ['board', 'tabBoard'], ['qa', 'tabQA'], ['g', 'tabGroup']].filter(function (i) { return vis.indexOf(i[0]) >= 0; });
   el.innerHTML = items.map(function (i) {
     return '<button data-t="' + i[0] + '" class="' + (S.tab === i[0] ? 'on' : '') + '">' + ICONS[i[0]] + '<span>' + esc(T(i[1])) + '</span></button>';
   }).join('');
@@ -199,8 +209,22 @@ function renderHeader() {
     '<div class="bRow"><div class="who"><b lang="' + S.lang + '">' + esc(S.name) + '</b>' +
       (g ? '<span class="gb" style="--g:' + WB.gcolor(g) + '">' + esc(T('groupN', { n: g })) + '</span>' : '') + '</div>' +
       '<div class="timer off" id="tm"><span id="tmv">--:--</span></div></div>' +
-    '<div class="tlabel" id="tml"></div>';
-  bindLangSw(el); tick();
+    '<div class="tlabel" id="tml"></div><div class="guide hide" id="gd"></div>';
+  bindLangSw(el); tick(); renderGuide();
+}
+
+/* 運営が出す「いまやること」の一行 */
+function renderGuide() {
+  var el = $('#gd'); if (!el) return;
+  var g = S.st && S.st.guide, txt = g ? (g[S.lang] || g.ja || g.en || g.bn || '') : '';
+  if (el.textContent !== txt) el.textContent = txt;
+  el.classList.toggle('hide', !txt);
+}
+
+/* 運営が選んだ「いま使うタブ」だけを出す */
+function visibleTabs() {
+  var all = ['q', 'disc', 'board', 'qa', 'g'], t = S.st && S.st.tabs;
+  return t && t.length ? all.filter(function (k) { return t.indexOf(k) >= 0; }) : all;
 }
 
 function renderOffline() {
@@ -226,7 +250,7 @@ setInterval(tick, 250);
 
 /* ───────── 通信（状態を取りに行く） ───────── */
 
-var LISTS = { questions: 'q', roster: 'p', answers: 'a', qa: 'qa' };
+var LISTS = { questions: 'q', roster: 'p', answers: 'a', qa: 'qa', comments: 'c' };
 
 function poll() {
   S.pollT = setTimeout(poll, (WB.cfg.pollSec || 6) * 1000 + Math.random() * 1500);   /* 端末ごとにずらす */
@@ -243,7 +267,12 @@ document.addEventListener('visibilitychange', function () {
 function applyState(st) {
   S.st = st; S.title = st.title || S.title; document.title = S.title;
   Object.keys(LISTS).forEach(function (n) { if (S.ver[LISTS[n]] < st.v[LISTS[n]]) refresh(n); });
-  renderHeader(); tick();
+  renderHeader(); tick(); renderGuide();
+  var vis = visibleTabs(), tsig = vis.join();
+  if (tsig !== S.tabSig) {
+    S.tabSig = tsig;
+    if (vis.indexOf(S.tab) < 0) showTab(vis[0]); else renderTabs();
+  }
   if (S.tab === 'g') renderGroup();
 }
 
@@ -262,13 +291,15 @@ function refresh(name) {
 function onList(name, res) {
   if (name === 'questions') {
     S.questions = res.questions; initDrafts();
-    safe('q', $('#v-q'), renderQ); renderBoardCtl(); renderBoardList(); renderQAList();
+    safe('q', $('#v-q'), renderQ); safe('disc', $('#v-disc'), renderDisc); renderBoardCtl(); renderBoardList(); renderQAList();
   } else if (name === 'roster') {
-    S.roster = res.roster; renderHeader(); renderGroup(); renderBoardCtl(); renderBoardList(); renderQAList(); checkMe();
+    S.roster = res.roster; renderHeader(); renderGroup(); renderBoardCtl(); renderBoardList(); renderQAList(); renderDiscList(); refreshTo(); checkMe();
   } else if (name === 'answers') {
     S.answers = res.answers; deriveMine(); renderBoardList();
   } else if (name === 'qa') {
     S.qa = res.qa; renderQAList();
+  } else if (name === 'comments') {
+    S.comments = res.comments; renderDiscList();
   }
 }
 
@@ -318,13 +349,14 @@ function qCard(q, i) {
 
 function renderQ() {
   var el = $('#v-q'); if (!el) return;
-  if (!S.questions.length) { el.innerHTML = '<div class="empty">' + esc(T('noQuestions')) + '</div>'; return; }
+  var AQ = ansQs();
+  if (!AQ.length) { el.innerHTML = '<div class="empty">' + esc(T('noQuestions')) + '</div>'; return; }
   el.innerHTML =
     '<div class="rowb" style="margin-bottom:12px"><span class="hint" style="flex:1 1 200px">' + esc(T('translateNote')) + '</span>' +
     '<label class="chk"><input type="checkbox" id="showOther"' + (S.showOther ? ' checked' : '') + '> ' + esc(T('showOther')) + '</label></div>' +
-    '<div style="display:flex;flex-direction:column;gap:12px">' + S.questions.map(qCard).join('') + '</div>';
+    '<div class="qgrid">' + AQ.map(qCard).join('') + '</div>';
   $('#showOther').onchange = function () { S.showOther = this.checked; WB.ls('wb.other', this.checked ? '1' : '0'); renderQ(); };
-  S.questions.forEach(function (q) {
+  AQ.forEach(function (q) {
     var ta = $('#ta-' + q.id);
     ta.value = S.drafts[q.id] !== undefined ? S.drafts[q.id] : '';
     ta.oninput = function () { S.drafts[q.id] = ta.value; WB.ls(dkey(q.id), ta.value); updQ(q.id); };
@@ -364,6 +396,210 @@ function upsertAnswer(qid, text, r) {
   renderBoardList();
 }
 
+/* ───────── 考える（写真を見て、みんなでコメント） ───────── */
+
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var MIC_LANG = { ja: 'ja-JP', en: 'en-US', bn: 'bn-BD' };
+
+function discQ() {
+  var D = discQs();
+  for (var i = 0; i < D.length; i++) if (D[i].id === S.dq) return D[i];
+  return D[0] || null;
+}
+
+function refreshTo() {
+  var sel = $('#cTo'); if (!sel || document.activeElement === sel) return;
+  var sig = S.roster.map(function (r) { return r.p + r.n + r.g; }).join();
+  if (sel.getAttribute('data-sig') === sig) return;
+  sel.setAttribute('data-sig', sig); sel.innerHTML = toOptions();
+}
+
+/* 宛先の候補:同じグループの人 → ほかの人（自分は除く） */
+function toOptions() {
+  var g = myGroup(), mine = [], others = [];
+  S.roster.forEach(function (r) {
+    if (r.p === S.pid) return;
+    (g && r.g === g ? mine : others).push(r);
+  });
+  var byN = function (a, b) { return WB.cmp(a.n, b.n); };
+  mine.sort(byN); others.sort(byN);
+  var opt = function (r) { return '<option value="' + r.p + '"' + (S.cTo === r.p ? ' selected' : '') + '>' + esc(r.n) + '</option>'; };
+  return '<option value="">' + esc(T('toAll')) + '</option>' +
+    (mine.length ? '<optgroup label="' + esc(T('toGroup')) + '">' + mine.map(opt).join('') + '</optgroup>' : '') +
+    (others.length ? (mine.length ? '<optgroup label="' + esc(T('toOthers')) + '">' : '') + others.map(opt).join('') + (mine.length ? '</optgroup>' : '') : '');
+}
+
+function renderDisc() {
+  var el = $('#v-disc'); if (!el) return;
+  stopMic();
+  var q = discQ();
+  if (!q) { el.innerHTML = '<div class="empty">' + esc(T('noQuestions')) + '</div>'; return; }
+  S.dq = q.id; S.dSig = '';
+  el.innerHTML =
+    '<p class="hint" style="margin:0">' + esc(T('discHint')) + '</p>' +
+    '<div class="dwrap"><div class="dq" id="dq"></div><div class="dleft" id="dleft"></div>' +
+    '<div class="dright"><h3>' + esc(T('cmtTitle')) + ' <span class="n" id="dn"></span></h3><div class="chips" id="cflt"></div><div class="clist" id="clist"></div></div>' +
+    '<div class="cin"><div class="toRow"><label for="cTo">' + esc(T('toLabel')) + '</label><select id="cTo" lang="' + S.lang + '">' + toOptions() + '</select></div>' +
+    '<textarea id="cTa" lang="' + S.lang + '" placeholder="' + esc(T('cmtPh')) + '"></textarea>' +
+    '<div class="tpls">' + ['tplGood', 'tplHelp', 'tplAsk'].map(function (k) { return '<button type="button" class="chip" data-tpl="' + k + '">' + esc(T(k)) + '</button>'; }).join('') + '</div>' +
+    '<div class="listen hide" id="cListen"></div>' +
+    '<div class="rowc">' + (SR ? '<button class="mic" id="cMic" type="button" aria-label="' + esc(T('micOn')) + '" title="' + esc(T('micOn')) + '">' +
+      '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0"/><path d="M12 18v3"/></svg></button>' : '') +
+    '<button class="btn" id="cSend" type="button">' + esc(T('post')) + '</button></div></div></div>';
+  renderDiscHead();
+  var ta = $('#cTa'); ta.value = S.dDraft[q.id] || '';
+  ta.oninput = function () { S.dDraft[q.id] = ta.value; };
+  ta.onkeydown = function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendComment(); } };
+  $('#cSend').onclick = sendComment;
+  $('#cTo').onchange = function () { S.cTo = this.value; };
+  [].forEach.call(document.querySelectorAll('[data-tpl]'), function (b) {
+    b.onclick = function () {
+      var txt = T(b.getAttribute('data-tpl')) + ' ', cur = ta.value;
+      ta.value = cur && !/\s$/.test(cur) ? cur + '\n' + txt : cur + txt;
+      S.dDraft[q.id] = ta.value; ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {}
+    };
+  });
+  if (SR) $('#cMic').onclick = micToggle;
+  renderDiscList(true);
+}
+
+function renderDiscHead() {
+  var q = discQ(); if (!q) return;
+  var dq = $('#dq'), left = $('#dleft'); if (!dq || !left) return;
+  dq.innerHTML = discQs().map(function (x, i) {
+    return '<button class="chip' + (x.id === q.id ? ' on' : '') + '" data-q="' + x.id + '">' + esc(T('qN', { n: i + 1 })) +
+      (x.img ? ' ·&#128247;' : '') + '</button>';
+  }).join('');
+  [].forEach.call(dq.querySelectorAll('button'), function (b) {
+    b.onclick = function () { S.dq = b.getAttribute('data-q'); renderDisc(); };
+  });
+  var others = '';
+  if (S.showOther) {
+    others = WB_LANGS.filter(function (l) { return l.code !== S.lang && q[l.code]; }).map(function (l) {
+      return '<span lang="' + l.code + '">' + esc(q[l.code]) + '</span>';
+    }).join('');
+  }
+  left.innerHTML = (q.img ? '<div class="dimg" id="dimg"></div>' : '') +
+    '<div class="dqbox"><div><span class="qno">' + esc(T('qN', { n: dIndex(q.id) + 1 })) + '</span></div>' +
+    '<p class="qtx" lang="' + qLang(q) + '">' + esc(WB.qText(q, S.lang)) + '</p>' +
+    (others ? '<p class="qother">' + others + '</p>' : '') + '</div>';
+  if (q.img) updImg(q);
+}
+
+function updImg(q) {
+  var box = $('#dimg'), cur = discQ(); if (!box || !q || !cur || cur.id !== q.id) return;
+  var im = S.imgs[q.id];
+  if (im && im.ver === q.img && im.data) {
+    box.innerHTML = '<img alt="" src="' + im.data + '"><span class="tap">' + esc(T('imgTap')) + '</span>';
+    $('img', box).onclick = function () {
+      var z = document.createElement('div'); z.className = 'zoom'; z.innerHTML = '<img alt="" src="' + im.data + '">';
+      z.onclick = function () { z.remove(); }; document.body.appendChild(z);
+    };
+  } else if (im && im.ver === q.img && im.err) {
+    box.innerHTML = '<button class="st" type="button">' + esc(T('imgFail')) + '</button>';
+    $('button', box).onclick = function () { delete S.imgs[q.id]; ensureImg(q); updImg(q); };
+  } else {
+    box.innerHTML = '<div class="st">' + esc(T('imgLoad')) + '</div>';
+    ensureImg(q);
+  }
+}
+
+function ensureImg(q) {
+  var im = S.imgs[q.id];
+  if (im && im.ver === q.img && (im.data || im.loading || im.err)) return;
+  S.imgs[q.id] = { ver: q.img, loading: true };
+  WB.get('image', { qid: q.id, v: q.img }).then(function (res) {
+    if (res.ok && res.data) S.imgs[q.id] = { ver: res.ver, data: res.data };
+    else if (res.error === 'stale') { delete S.imgs[q.id]; S.lastFetch.questions = 0; refresh('questions'); return; }
+    else S.imgs[q.id] = { ver: q.img, err: true };
+    var cur = discQ(); if (cur && cur.id === q.id) updImg(cur);
+  });
+}
+
+function renderDiscList(force) {
+  var box = $('#clist'), q = discQ(); if (!box || !q) return;
+  var rm = rosterMap();
+  var all = S.comments.filter(function (c) { return c.q === q.id; });
+  var nMe = all.filter(function (c) { return c.to === S.pid; }).length;
+  if (S.cFilter === 'me' && !nMe) S.cFilter = 'all';
+  var items = S.cFilter === 'me' ? all.filter(function (c) { return c.to === S.pid; }) : all;
+  var sig = [q.id, S.lang, S.pid, S.cFilter, nMe, items.map(function (c) {
+    var r = rm[c.p], t = c.to && rm[c.to]; return c.id + (r ? r.n + r.g : '') + (t ? t.n : '');
+  }).join(',')].join('|');
+  if (!force && sig === S.dSig) return;
+  var first = S.dSig === '' || force;
+  var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 70, st = box.scrollTop;
+  S.dSig = sig;
+  var n = $('#dn'); if (n) n.textContent = all.length ? '(' + all.length + ')' : '';
+  var fl = $('#cflt');
+  if (fl) {
+    fl.innerHTML = nMe ? [['all', T('all'), all.length], ['me', T('fltMe'), nMe]].map(function (d) {
+      return '<button class="chip' + (S.cFilter === d[0] ? ' on' : '') + '" data-f="' + d[0] + '">' + esc(d[1]) + ' (' + d[2] + ')</button>';
+    }).join('') : '';
+    [].forEach.call(fl.querySelectorAll('button'), function (b) { b.onclick = function () { S.cFilter = b.getAttribute('data-f'); renderDiscList(true); }; });
+  }
+  box.innerHTML = items.length ? items.map(function (c) {
+    var r = rm[c.p], g = r && r.g, tr = (c.l !== S.lang && c[S.lang]) ? c[S.lang] : null;
+    var tor = c.to && rm[c.to];
+    return '<div class="cm' + (c.p === S.pid ? ' mine' : '') + (c.to === S.pid ? ' tome' : '') + '"><div class="who2"><span>' + esc(r ? r.n : '—') + (c.p === S.pid ? ' (' + esc(T('mine')) + ')' : '') +
+      (c.to ? ' → ' + (c.to === S.pid ? '<b class="toyou">' + esc(T('toYou')) + '</b>' : esc(tor ? tor.n : '—')) : '') + '</span>' +
+      (g ? '<span class="gb" style="--g:' + WB.gcolor(g) + ';height:16px;min-width:16px;font-size:10px">' + esc(g) + '</span>' : '') +
+      '<span>' + esc(hhmm(c.ts)) + '</span></div>' +
+      '<p lang="' + (tr ? S.lang : c.l) + '">' + esc(tr || c.t) + '</p>' +
+      (tr ? '<div class="tr" lang="' + c.l + '"><small>' + esc(T('original')) + ' · ' + esc(WB.langName(c.l)) + '</small>' + esc(c.t) + '</div>' : '') + '</div>';
+  }).join('') : '<div class="empty" style="padding:22px 8px">' + esc(T('noCmt')) + '</div>';
+  box.scrollTop = (first || nearBottom) ? box.scrollHeight : st;
+}
+
+function sendComment() {
+  var q = discQ(), ta = $('#cTa'), bt = $('#cSend'); if (!q || !ta) return;
+  stopMic();
+  var text = ta.value.trim();
+  if (!text) { toast(T('emptyErr'), true); return; }
+  bt.disabled = true;
+  WB.post({ type: 'comment', pid: S.pid, qid: q.id, text: text, lang: S.lang, to: S.cTo }).then(function (r) {
+    bt.disabled = false;
+    if (r.ok) {
+      S.dDraft[q.id] = ''; if ($('#cTa')) $('#cTa').value = '';
+      S.comments = S.comments.concat([{ id: r.id, ts: Date.now(), q: q.id, p: S.pid, to: r.to || '', l: r.lang || S.lang, t: text, ja: r.ja || '', en: r.en || '', bn: r.bn || '' }]);
+      renderDiscList(true); toast(T('posted'));
+      S.lastFetch.comments = 0; refresh('comments');
+    } else if (r.error === 'nopid') { WB.ls('wb.pid', null); showRegister(T('gone')); }
+    else toast(T('fail'), true);
+  });
+}
+
+/* 音声入力（端末のブラウザの機能。使えない端末ではボタンごと出さない） */
+function setMicUi(on) {
+  var b = $('#cMic'), l = $('#cListen');
+  if (b) b.classList.toggle('on', !!on);
+  if (l) { l.textContent = on ? T('micListening') : ''; l.classList.toggle('hide', !on); }
+}
+function stopMic() {
+  if (S.rec) { try { S.rec.abort(); } catch (e) {} S.rec = null; }
+  setMicUi(false);
+}
+function micToggle() {
+  if (S.rec) { try { S.rec.stop(); } catch (e) {} return; }
+  var ta = $('#cTa'), q = discQ(); if (!SR || !ta || !q) return;
+  var base = ta.value, sep = base && !/\s$/.test(base) ? ' ' : '';
+  var r = new SR();
+  r.lang = MIC_LANG[S.lang] || 'en-US'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
+  r.onresult = function (e) {
+    var fin = '', tmp = '';
+    for (var i = 0; i < e.results.length; i++) {
+      var x = e.results[i]; if (x.isFinal) fin += x[0].transcript; else tmp += x[0].transcript;
+    }
+    ta.value = base + sep + fin + tmp; S.dDraft[q.id] = ta.value;
+  };
+  r.onerror = function (e) {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast(T('micDenied'), true);
+    else if (e.error !== 'aborted') toast(T('micErr'), true);
+  };
+  r.onend = function () { if (S.rec === r) S.rec = null; setMicUi(false); };
+  try { r.start(); S.rec = r; setMicUi(true); } catch (err) { S.rec = null; setMicUi(false); toast(T('micErr'), true); }
+}
+
 /* ───────── ボード ───────── */
 
 function renderBoardShell() {
@@ -381,13 +617,13 @@ function groupList() {
 function renderBoardCtl() {
   var el = $('#bctl'); if (!el) return;
   var gs = groupList();
-  var sig = [S.lang, S.sort, S.fq, S.fg, S.questions.map(function (q) { return q.id; }).join(), gs.join()].join('|');
+  var sig = [S.lang, S.sort, S.fq, S.fg, ansQs().map(function (q) { return q.id; }).join(), gs.join()].join('|');
   if (sig === S.bctlSig) return;
   S.bctlSig = sig;
   el.innerHTML =
     '<div class="seg2"><button data-s="q" class="' + (S.sort === 'q' ? 'on' : '') + '">' + esc(T('byQ')) + '</button>' +
     '<button data-s="g" class="' + (S.sort === 'g' ? 'on' : '') + '">' + esc(T('byG')) + '</button></div>' +
-    '<select id="fq" lang="' + S.lang + '"><option value="">' + esc(T('allQ')) + '</option>' + S.questions.map(function (q, i) {
+    '<select id="fq" lang="' + S.lang + '"><option value="">' + esc(T('allQ')) + '</option>' + ansQs().map(function (q, i) {
       return '<option value="' + q.id + '"' + (S.fq === q.id ? ' selected' : '') + '>' + esc(T('qN', { n: i + 1 })) + '</option>';
     }).join('') + '</select>' +
     '<select id="fg" lang="' + S.lang + '"><option value="">' + esc(T('allG') ) + '</option>' + gs.map(function (g) {
@@ -426,10 +662,10 @@ function renderBoardList() {
   var el = $('#bl'); if (!el) return;
   var items = boardItems(), html = '';
   var byName = function (a, b) { return WB.cmp(a.name, b.name); };
-  if (!items.length && !S.questions.length) { el.innerHTML = '<div class="empty">' + esc(T('noAnswers')) + '</div>'; return; }
+  if (!items.length && !ansQs().length) { el.innerHTML = '<div class="empty">' + esc(T('noAnswers')) + '</div>'; return; }
 
   if (S.sort === 'q') {
-    S.questions.forEach(function (q, i) {
+    ansQs().forEach(function (q, i) {
       if (S.fq && q.id !== S.fq) return;
       var list = items.filter(function (it) { return it.a.q === q.id; })
         .sort(function (a, b) { return (parseInt(a.g, 10) || 999) - (parseInt(b.g, 10) || 999) || byName(a, b); });
@@ -563,10 +799,11 @@ var A = {
   draft: {}, draftDirty: false, gSet: { mode: 'size', val: 3, mix: true }, gConfirm: false, gSig: '',
   set: null, sDirty: false,
   ansLang: WB.ls('wb.alang') || 'ja', ansQ: '', onlyMissing: false,
-  qaFilter: 'open', qaDraft: {}, tmLabel: '', tmMin: '10'
+  qaFilter: 'open', qaDraft: {}, tmLabel: '', tmMin: '10',
+  imgs: {}, cmQ: ''
 };
 
-var TABS = [['ov', '概要'], ['q', '問い'], ['t', 'タイマー'], ['g', 'グループ'], ['a', '回答'], ['qa', 'Q&A'], ['s', '設定']];
+var TABS = [['ov', '概要'], ['q', '問い'], ['t', '進行'], ['g', 'グループ'], ['a', '回答'], ['c', 'コメント'], ['qa', 'Q&A'], ['s', '設定']];
 var LNAME = { ja: '日本語', en: 'English', bn: 'বাংলা' };
 
 /* ───────── 小さな道具 ───────── */
@@ -666,11 +903,12 @@ function renderHead() {
   var d = A.d, el = $('#ahdr'); if (!el) return;
   var open = d.qa.filter(function (x) { return !x.a; }).length;
   if (!$('#pT')) {
-    el.innerHTML = '<div class="abar"><h1 id="hTitle"></h1><span class="pill" id="pP"></span><span class="pill" id="pA"></span><span class="pill" id="pQ"></span><span class="pill" id="pT">--:--</span></div>';
+    el.innerHTML = '<div class="abar"><h1 id="hTitle"></h1><span class="pill" id="pP"></span><span class="pill" id="pA"></span><span class="pill" id="pC"></span><span class="pill" id="pQ"></span><span class="pill" id="pT">--:--</span></div>';
   }
   $('#hTitle').textContent = '運営ページ · ' + d.state.title;
   $('#pP').textContent = '参加者 ' + d.participants.length + (d.state.expected ? ' / ' + d.state.expected : '');
   $('#pA').textContent = '回答 ' + d.answers.length;
+  $('#pC').textContent = 'コメント ' + (d.comments || []).length;
   $('#pQ').textContent = '未回答Q&A ' + open; $('#pQ').classList.toggle('hot', open > 0);
 }
 
@@ -687,7 +925,7 @@ function renderTabs() {
 
 function renderPane(force) {
   var el = $('#pane'); if (!el || !A.d) return;
-  var fn = { ov: pOverview, q: pQuestions, t: pTimer, g: pGroups, a: pAnswers, qa: pQA, s: pSettings }[A.tab];
+  var fn = { ov: pOverview, q: pQuestions, t: pTimer, g: pGroups, a: pAnswers, c: pComments, qa: pQA, s: pSettings }[A.tab];
   if (!force && ((A.tab === 'q' && A.qDirty) || (A.tab === 's' && A.sDirty))) return;     /* 編集中の内容は守る */
   if (force) { delete pending.pane; fn(el); } else safe('pane', el, function () { fn(el); });
 }
@@ -751,7 +989,18 @@ function pQuestions(el) {
         '<span class="sp"></span><button class="ib" data-a="up"' + (i === 0 ? ' disabled' : '') + '>↑</button><button class="ib" data-a="dn"' + (i === Q.length - 1 ? ' disabled' : '') + '>↓</button><button class="ib" data-a="del">✕</button></div>' +
         '<div class="langs">' + ['ja', 'en', 'bn'].map(function (l) {
           return '<div class="lf"><label>' + LNAME[l] + ((q.auto || []).indexOf(l) >= 0 ? ' <span class="mt">⚙ 機械翻訳・要確認</span>' : '') + '</label><textarea data-l="' + l + '" lang="' + l + '">' + esc(q[l]) + '</textarea></div>';
-        }).join('') + '</div></div>';
+        }).join('') + '</div>' +
+        '<div class="imgrow"><label class="small" for="md-' + i + '">表示先</label><select data-mode id="md-' + i + '" style="width:auto;min-height:40px;font-size:14px">' +
+          [['both', '問いタブ・考えるタブの両方'], ['ans', '問いタブだけ（回答を書く）'], ['disc', '考えるタブだけ（コメントを書く）']].map(function (m) {
+            return '<option value="' + m[0] + '"' + ((q.mode || 'both') === m[0] ? ' selected' : '') + '>' + m[1] + '</option>';
+          }).join('') + '</select></div>' +
+        '<div class="imgrow">' + (q.id
+          ? (q.img ? '<img data-thumb alt="">' : '') +
+            '<button class="btn2 k" data-a="imgadd" type="button">' + (q.img ? '写真を差し替える' : '写真を追加') + '</button>' +
+            (q.img ? '<button class="btn2 r" data-a="imgdel" type="button">写真を削除</button>' : '') +
+            '<input type="file" accept="image/*" class="hide" data-file>' +
+            '<span class="small">参加者の「考える」タブに表示されます（自動で縮小します）</span>'
+          : '<span class="small">先に「保存して参加者に反映」を押すと、この問いに写真を追加できます</span>') + '</div></div>';
     }).join('') + '</div>' + (Q.length ? '' : '<div class="empty">問いがまだありません</div>') +
     '<div class="row2"><button class="btn2 k" id="qAdd">＋ 問いを追加</button><button class="btn2" id="qTr">空欄を自動翻訳</button><button class="btn2" id="qImp">表計算から貼り付け</button></div>' +
     '<div id="qImpBox" class="box ' + (A.qImport ? '' : 'hide') + '"><h3>貼り付けで追加</h3><div class="small">スプレッドシートで「日本語｜English｜বাংলা」の3列（1行が1問、空欄OK）をコピーして、下に貼り付けてください。</div>' +
@@ -768,6 +1017,31 @@ function pQuestions(el) {
         setQDirty(true);
       };
     });
+    var qi = A.qEdit[i];
+    $('[data-mode]', row).onchange = function () { A.qEdit[i].mode = this.value; setQDirty(true); };
+    if (qi && qi.id && qi.img) showThumb(qi, $('[data-thumb]', row));
+    var addb = $('[data-a="imgadd"]', row), delb = $('[data-a="imgdel"]', row), fi = $('[data-file]', row);
+    if (addb) {
+      addb.onclick = function () { fi.click(); };
+      fi.onchange = function () {
+        var f = fi.files && fi.files[0]; if (!f) return;
+        addb.disabled = true; addb.textContent = '縮小して保存中…';
+        (window.__resizeImage || resizeImage)(f).then(function (data) {
+          return call({ type: 'a_img_set', qid: qi.id, data: data }).then(function (r) {
+            if (r && r.ok) { A.imgs[qi.id] = { ver: r.ver, data: data }; qi.img = r.ver; toast('写真を保存しました。参加者の「考える」タブに出ます'); load(); }
+            else if (r && r.error === 'toobig') toast('写真のサイズが大きすぎます。小さい写真でお試しください', true);
+            else toast('保存できませんでした', true);
+            pQuestions(el);
+          });
+        }).catch(function () { toast('この写真は読み込めませんでした', true); pQuestions(el); });
+      };
+    }
+    if (delb) delb.onclick = function () {
+      if (!confirm('この問いの写真を削除しますか？')) return;
+      call({ type: 'a_img_del', qid: qi.id }).then(function (r) {
+        if (r && r.ok) { qi.img = 0; delete A.imgs[qi.id]; toast('写真を削除しました'); load(); pQuestions(el); } else toast('削除できませんでした', true);
+      });
+    };
     $$('.ib', row).forEach(function (b) {
       b.onclick = function () {
         var a = b.getAttribute('data-a');
@@ -781,7 +1055,7 @@ function pQuestions(el) {
       };
     });
   });
-  $('#qAdd').onclick = function () { A.qEdit.push({ id: '', ja: '', en: '', bn: '', auto: [] }); setQDirty(true); pQuestions(el); var t = $$('.qe textarea', el); if (t.length) t[t.length - 3].focus(); };
+  $('#qAdd').onclick = function () { A.qEdit.push({ id: '', ja: '', en: '', bn: '', auto: [], mode: 'both' }); setQDirty(true); pQuestions(el); var t = $$('.qe textarea', el); if (t.length) t[t.length - 3].focus(); };
   $('#qImp').onclick = function () { A.qImport = !A.qImport; $('#qImpBox').classList.toggle('hide', !A.qImport); };
   $('#qImpGo').onclick = function () {
     var lines = $('#qImpTa').value.split(/\r?\n/).filter(function (x) { return x.trim(); }), n = 0;
@@ -805,7 +1079,7 @@ function pQuestions(el) {
   };
   $('#qSave').onclick = function () {
     var b = this; b.disabled = true;
-    call({ type: 'a_q_save', rows: A.qEdit.map(function (q) { return { id: q.id, ja: q.ja, en: q.en, bn: q.bn, auto: q.auto || [] }; }) }).then(function (r) {
+    call({ type: 'a_q_save', rows: A.qEdit.map(function (q) { return { id: q.id, ja: q.ja, en: q.en, bn: q.bn, auto: q.auto || [], mode: q.mode || 'both' }; }) }).then(function (r) {
       if (r && r.ok) { A.qEdit = clone(r.questions); setQDirty(false); toast('保存しました。参加者の画面に反映されます'); load(); pQuestions(el); }
       else { b.disabled = false; toast('保存できませんでした', true); }
     });
@@ -814,10 +1088,27 @@ function pQuestions(el) {
 
 /* ───────── タイマー ───────── */
 
+var TAB_DEFS = [['q', '問い'], ['disc', '考える'], ['board', 'ボード'], ['qa', 'Q&A'], ['g', 'グループ']];
+var GUIDE_PRESETS = [
+  { name: '① 入室・グループ確認', text: 'いま：名前を入れて、自分のグループ番号を確認してください', tabs: ['g'] },
+  { name: '② 発表＋応援コメント', text: 'いま：話している人に、応援コメントを書きましょう（「考える」タブ）', tabs: ['disc', 'g'] },
+  { name: '③ 問いに答える', text: 'いま：「問い」タブで、自分の答えを書いて送信しましょう', tabs: ['q', 'disc'] },
+  { name: '④ みんなで見る', text: 'いま：「ボード」で、みんなの考えを見てみましょう', tabs: ['board', 'qa'] },
+  { name: '全部出す', text: '', tabs: ['q', 'disc', 'board', 'qa', 'g'] }
+];
+function curTabs() { var t = A.d.state.tabs; return t && t.length ? t : ['q', 'disc', 'board', 'qa', 'g']; }
+
 function pTimer(el) {
   var tm = A.d.state.timer, Q = A.d.questions;
   el.innerHTML =
     '<div class="box" style="align-items:center;text-align:center"><div class="big" id="tBig">--:--</div><div class="small" id="tLab"></div></div>' +
+    '<div class="box"><h3>参加者への案内（いまやること）と、いま使うタブ</h3>' +
+    '<div class="small">参加者の画面の上に一行で表示されます。日本語で書けば、英語・ベンガル語に自動で訳されます。場面ボタンを押すと、案内とタブがまとめて切り替わります。</div>' +
+    '<div class="presets" id="gdPre">' + GUIDE_PRESETS.map(function (g, i) { return '<button class="btn2 k" data-gp="' + i + '">' + esc(g.name) + '</button>'; }).join('') + '</div>' +
+    '<div class="row2"><input type="text" id="gdText" maxlength="120" style="flex:1 1 260px" placeholder="例：いま：1人目の発表を聞いて、応援コメントを書く" value="' + esc(A.guideText !== undefined ? A.guideText : ((A.d.state.guide || {}).ja || '')) + '"><button class="btn2 k" id="gdSet">表示</button><button class="btn2" id="gdClr">消す</button></div>' +
+    '<div class="row2" id="gdTabs"><span class="small">いま使うタブ：</span>' + TAB_DEFS.map(function (t) {
+      return '<label class="chk"><input type="checkbox" data-tab="' + t[0] + '"' + (curTabs().indexOf(t[0]) >= 0 ? ' checked' : '') + '> ' + t[1] + '</label>';
+    }).join('') + '</div></div>' +
     '<div class="box"><h3>開始</h3><div class="row2"><label for="tmLabel">ラベル（参加者の画面に出ます）</label><input type="text" id="tmLabel" list="qids" style="max-width:260px" maxlength="60" placeholder="例：問い1 の話し合い" value="' + esc(A.tmLabel) + '"></div>' +
     '<datalist id="qids">' + Q.map(function (q, i) { return '<option value="問い ' + (i + 1) + '">'; }).join('') + '</datalist>' +
     '<div class="presets">' + [3, 5, 10, 15, 20, 30].map(function (m) { return '<button class="btn2 k" data-m="' + m + '">' + m + ' 分</button>'; }).join('') + '</div>' +
@@ -825,6 +1116,26 @@ function pTimer(el) {
     '<div class="box"><h3>操作</h3><div class="presets"><button class="btn2" id="tmPause">一時停止</button><button class="btn2" id="tmResume">再開</button>' +
     '<button class="btn2" data-add="-1">−1 分</button><button class="btn2" data-add="1">＋1 分</button><button class="btn2" data-add="5">＋5 分</button><button class="btn2 r" id="tmReset">リセット</button></div>' +
     '<div class="small">タイマーはすべての参加者の画面の上部に、いつでも表示されます。終了時刻はサーバーの時計で決まるので、端末の時計がずれていても同じ残り時間になります。</div></div>';
+  var applyGuide = function (o, msg) {
+    call(Object.assign({ type: 'a_guide' }, o)).then(function (r) { if (r && r.ok) { toast(msg || '参加者の画面に反映しました'); load(); } else toast('反映できませんでした', true); });
+  };
+  $('#gdText').oninput = function () { A.guideText = this.value; };
+  $('#gdSet').onclick = function () { var t = $('#gdText').value.trim(); if (!t) return toast('案内の文を入力してください', true); applyGuide({ text: t }); };
+  $('#gdClr').onclick = function () { $('#gdText').value = ''; A.guideText = ''; applyGuide({ text: '' }, '案内を消しました'); };
+  $$('[data-tab]', el).forEach(function (cb) {
+    cb.onchange = function () {
+      var on = $$('[data-tab]', el).filter(function (x) { return x.checked; }).map(function (x) { return x.getAttribute('data-tab'); });
+      if (!on.length) { cb.checked = true; return toast('タブは1つ以上、選んでください', true); }
+      applyGuide({ tabs: on });
+    };
+  });
+  $$('[data-gp]', el).forEach(function (b) {
+    b.onclick = function () {
+      var g = GUIDE_PRESETS[+b.getAttribute('data-gp')];
+      $('#gdText').value = g.text; A.guideText = g.text;
+      applyGuide({ text: g.text, tabs: g.tabs }, '「' + g.name + '」に切り替えました');
+    };
+  });
   var op = function (o) {
     call(Object.assign({ type: 'a_timer' }, o)).then(function (r) {
       if (r && r.ok) { A.d.state.timer = r.state.timer; adminTick(); renderHead(); } else toast('操作できませんでした', true);
@@ -1058,6 +1369,79 @@ function pAnswers(el) {
       out.push([x.id, new Date(x.ts).toLocaleString(), p.n, p.g, x.k === 'word' ? '言葉' : '質問', x.l, x.t, x.ja, x.en, x.bn, x.a ? '済' : '', a.t, a.ja, a.en, a.bn]);
     });
     download('qa-' + stamp() + '.csv', out);
+  };
+}
+
+/* 写真を縮小して JPEG の文字列にする（長辺 1280px まで。大きすぎれば、さらに小さくする） */
+var IMG_MAX_CHARS = 470000;
+function resizeImage(file) {
+  return new Promise(function (resolve, reject) {
+    var fr = new FileReader();
+    fr.onerror = reject;
+    fr.onload = function () {
+      var img = new Image();
+      img.onerror = reject;
+      img.onload = function () {
+        var steps = [[1280, 0.82], [1280, 0.7], [1024, 0.7], [800, 0.65], [640, 0.6]], out = '';
+        for (var i = 0; i < steps.length; i++) {
+          var sc = Math.min(1, steps[i][0] / Math.max(img.naturalWidth, img.naturalHeight));
+          var w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
+          var c = document.createElement('canvas'); c.width = w; c.height = h;
+          var cx = c.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h); cx.drawImage(img, 0, 0, w, h);
+          out = c.toDataURL('image/jpeg', steps[i][1]);
+          if (out.length <= IMG_MAX_CHARS) return resolve(out);
+        }
+        resolve(out);
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+/* 運営画面の見本表示（一度取った写真は覚えておく） */
+function showThumb(q, img) {
+  if (!img) return;
+  var im = A.imgs[q.id];
+  if (im && im.ver === q.img && im.data) { img.src = im.data; return; }
+  WB.get('image', { qid: q.id, v: q.img }).then(function (r) {
+    if (r && r.ok && r.data) { A.imgs[q.id] = { ver: r.ver, data: r.data }; if (img.isConnected !== false) img.src = r.data; }
+  });
+}
+
+/* ───────── コメント（「考える」タブ） ───────── */
+
+function pComments(el) {
+  var d = A.d, pm = pmap(), Q = d.questions, all = d.comments || [];
+  var shown = all.filter(function (c) { return !A.cmQ || c.q === A.cmQ; }).sort(function (a, b) { return b.ts - a.ts; });
+  el.innerHTML =
+    '<div class="infobox">参加者が「考える」タブに書いたコメントです。不適切なものは「削除」で全員の画面から消せます。</div>' +
+    '<div class="row2">' + langSel('cmLang') + '<select id="cmQ" style="width:auto;min-height:42px;font-size:14px"><option value="">すべての問い（' + all.length + '件）</option>' +
+      Q.map(function (q, i) { return '<option value="' + q.id + '"' + (A.cmQ === q.id ? ' selected' : '') + '>問い ' + (i + 1) + '（' + all.filter(function (c) { return c.q === q.id; }).length + '件）</option>'; }).join('') + '</select>' +
+    '<span style="flex:1"></span><button class="btn2 k" id="cmCsv">コメントをCSVで保存</button></div>' +
+    (shown.length ? '<div style="display:flex;flex-direction:column;gap:10px">' + shown.map(function (c) {
+      var p = pm[c.p] || { n: '—' }, tr = A.ansLang !== 'orig' && c.l !== A.ansLang && c[A.ansLang];
+      return '<article class="qai" data-id="' + c.id + '"><div class="meta"><span class="tag q">問い ' + qNo(c.q) + '</span><b>' + esc(p.n) + '</b>' +
+        (p.g ? '<span class="gb" style="--g:' + WB.gcolor(p.g) + ';height:20px;min-width:20px;font-size:11px">' + esc(p.g) + '</span>' : '') + '<span>' + esc(hhmm(c.ts)) + '</span></div>' +
+        '<p lang="' + (tr ? A.ansLang : c.l) + '">' + esc(disp(c, A.ansLang)) + '</p>' +
+        (tr ? '<div class="tr" lang="' + c.l + '"><small>原文 · ' + LNAME[c.l] + '</small>' + esc(c.t) + '</div>' : '') +
+        '<div class="row2"><button class="btn2 r" data-rm>削除</button></div></article>';
+    }).join('') + '</div>' : '<div class="empty">まだコメントはありません</div>');
+  $('#cmLang').onchange = function () { A.ansLang = this.value; WB.ls('wb.alang', this.value); pComments(el); };
+  $('#cmQ').onchange = function () { A.cmQ = this.value; pComments(el); };
+  $$('.qai', el).forEach(function (row) {
+    $('[data-rm]', row).onclick = function () {
+      if (!confirm('このコメントを削除しますか？（参加者の画面からも消えます）')) return;
+      call({ type: 'a_c_del', id: row.getAttribute('data-id') }).then(function (r) { if (r && r.ok) { toast('削除しました'); load(); } else toast('削除できませんでした', true); });
+    };
+  });
+  $('#cmCsv').onclick = function () {
+    var out = [['ID', '時刻', '問い', '名前', 'グループ', '言語', 'コメント（原文）', '日本語', 'English', 'বাংলা']];
+    all.slice().sort(function (a, b) { return qNo(a.q) - qNo(b.q) || a.ts - b.ts; }).forEach(function (c) {
+      var p = pm[c.p] || {};
+      out.push([c.id, new Date(c.ts).toLocaleString(), '問' + qNo(c.q), p.n, p.g, c.l, c.t, c.ja, c.en, c.bn]);
+    });
+    download('comments-' + stamp() + '.csv', out);
   };
 }
 

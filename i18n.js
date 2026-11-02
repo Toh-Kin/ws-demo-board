@@ -11,6 +11,12 @@ var WB_LANGS = [
 
 var WB_I18N = {
   ja: {
+    toLabel: "宛先", toAll: "全員", toYou: "あなた宛て", fltMe: "自分宛て", toGroup: "同じグループ", toOthers: "ほかの人",
+    tplGood: "いいと思った点:", tplHelp: "私にできる協力:", tplAsk: "質問:",
+    tabDisc: "考える", discHint: "写真を見て、気づいたこと・考えたことをコメントしてください。みんなのコメントも読めます。",
+    cmtTitle: "みんなのコメント", cmtPh: "ここにコメントを書く…", noCmt: "まだコメントがありません。最初に書いてみましょう",
+    micOn: "音声で入力", micListening: "聞き取り中…(タップで止める)", micDenied: "マイクが許可されていません。ブラウザの設定で許可してください",
+    micErr: "音声を聞き取れませんでした", imgLoad: "画像を読み込み中…", imgFail: "画像を読み込めませんでした。タップでやり直し", imgTap: "タップで拡大",
     boardNote: "ほかの言語で書かれた回答は自動翻訳して表示します。原文は下に小さく出ます。",
     nameLabel: "あなたの名前", namePh: "名前を入力", affilLabel: "所属・チーム（任意）", affilPh: "例：学校名、部署名",
     start: "はじめる", lang: "言語",
@@ -37,6 +43,12 @@ var WB_I18N = {
     offline: "接続が不安定です。再接続を試しています…", registeredAs: "登録名"
   },
   en: {
+    toLabel: "To", toAll: "Everyone", toYou: "To you", fltMe: "To me", toGroup: "My group", toOthers: "Others",
+    tplGood: "What I liked:", tplHelp: "How I can help:", tplAsk: "Question:",
+    tabDisc: "Discuss", discHint: "Look at the picture and add what you notice or think. You can read everyone's comments.",
+    cmtTitle: "Comments", cmtPh: "Write a comment…", noCmt: "No comments yet. Be the first to write one.",
+    micOn: "Voice input", micListening: "Listening… (tap to stop)", micDenied: "The microphone is blocked. Allow it in your browser settings.",
+    micErr: "Could not catch that. Please try again.", imgLoad: "Loading picture…", imgFail: "Could not load the picture. Tap to retry.", imgTap: "Tap to enlarge",
     boardNote: "Answers written in other languages are auto-translated. The original is shown below.",
     nameLabel: "Your name", namePh: "Type your name", affilLabel: "Organization / team (optional)", affilPh: "e.g. school or department",
     start: "Start", lang: "Language",
@@ -63,6 +75,12 @@ var WB_I18N = {
     offline: "Connection is unstable. Retrying…", registeredAs: "Signed in as"
   },
   bn: {
+    toLabel: "প্রাপক", toAll: "সবাইকে", toYou: "আপনার জন্য", fltMe: "আমার জন্য", toGroup: "আমার গ্রুপ", toOthers: "অন্যরা",
+    tplGood: "যা ভালো লেগেছে:", tplHelp: "আমি যেভাবে সাহায্য করতে পারি:", tplAsk: "প্রশ্ন:",
+    tabDisc: "আলোচনা", discHint: "ছবিটি দেখে আপনি যা লক্ষ্য করছেন বা ভাবছেন তা কমেন্ট করুন। সবার কমেন্টও পড়তে পারবেন।",
+    cmtTitle: "সবার কমেন্ট", cmtPh: "এখানে কমেন্ট লিখুন…", noCmt: "এখনও কোনো কমেন্ট নেই। প্রথমে আপনি লিখুন।",
+    micOn: "ভয়েসে লিখুন", micListening: "শুনছি… (থামাতে ট্যাপ করুন)", micDenied: "মাইক্রোফোন অনুমোদিত নয়। ব্রাউজারের সেটিংসে অনুমতি দিন।",
+    micErr: "শোনা যায়নি। আবার চেষ্টা করুন।", imgLoad: "ছবি লোড হচ্ছে…", imgFail: "ছবি লোড করা যায়নি। আবার চেষ্টা করতে ট্যাপ করুন।", imgTap: "বড় করতে ট্যাপ করুন",
     boardNote: "অন্য ভাষায় লেখা উত্তর স্বয়ংক্রিয়ভাবে অনুবাদ করে দেখানো হয়। মূল লেখা নিচে ছোট করে দেওয়া থাকে।",
     nameLabel: "আপনার নাম", namePh: "আপনার নাম লিখুন", affilLabel: "প্রতিষ্ঠান / দল (ঐচ্ছিক)", affilPh: "যেমন: স্কুল বা বিভাগের নাম",
     start: "শুরু করুন", lang: "ভাষা",
